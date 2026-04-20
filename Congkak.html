@@ -1084,6 +1084,9 @@ function App() {
   const boardRef = useRef(null);                // authoritative board in simultaneous mode
   const handAtRef = useRef({0: null, 1: null}); // current stop of each active hand (for collision detection)
   const busyRef = useRef({0: false, 1: false}); // whether each player's coroutine is currently sowing
+  // In opener-sim: true once a player ends a move WITHOUT rumah continuation.
+  // They must wait for the other to finish; then opener ends and we switch to alternating.
+  const openerDoneRef = useRef({0: false, 1: false});
   const [phase, setPhase] = useState('alternating'); // 'opener-sim' | 'alternating'
   const phaseRef = useRef('alternating');
   const abortRef = useRef(0); // bumped on reset — running coroutines observe their captured token and bail
@@ -1181,6 +1184,8 @@ function App() {
     if (winner != null) return false;
     if (phaseRef.current === 'opener-sim') {
       // Each player acts independently — as long as they're not mid-sow
+      // AND they haven't already ended their opener turn (non-rumah end).
+      if (openerDoneRef.current[p]) return false;
       return !hands[p] && !busyRef.current[p];
     } else {
       return currentPlayer === p && !isAnimating;
@@ -1317,6 +1322,7 @@ function App() {
     boardRef.current = {holes: [...fresh.holes], rumah: [...fresh.rumah]};
     handAtRef.current = {0: null, 1: null};
     busyRef.current = {0: false, 1: false};
+    openerDoneRef.current = {0: false, 1: false};
     const initialPhase = style === 'simultaneous' ? 'opener-sim' : 'alternating';
     setPhase(initialPhase);
     phaseRef.current = initialPhase;
@@ -1511,10 +1517,10 @@ function App() {
   // In simultaneous-opener phase, both sides are playable independently (as long as that player isn't already sowing)
   const inOpener = phase === 'opener-sim';
   const canBottomPlay = inOpener
-    ? (!hands[0] && !winner)
+    ? (!hands[0] && !winner && !openerDoneRef.current[0])
     : (currentPlayer === 0 && !isAnimating && !winner);
   const canTopPlay = inOpener
-    ? (!hands[1] && !winner)
+    ? (!hands[1] && !winner && !openerDoneRef.current[1])
     : (currentPlayer === 1 && !isAnimating && !winner);
 
   const p0Active = inOpener ? !winner : (currentPlayer === 0 && !winner);
@@ -2055,6 +2061,7 @@ function App() {
   async function playMoveParallel(p, startHole) {
     if (winner != null) return;
     if (busyRef.current[p]) return;
+    if (openerDoneRef.current[p]) return;
     if (!isOwnSide(startHole, p)) return;
     if (boardRef.current.holes[startHole] === 0) return;
 
@@ -2218,20 +2225,19 @@ function App() {
       }
     }
 
-    // This coroutine finished. Clear its hand and position marker.
+    // This coroutine finished. Mark the player's opener status before clearing the hand,
+    // so the re-render (triggered by setMyHand) sees the correct canPlayerAct result.
+    if (!resolvedInOwnRumah) openerDoneRef.current[p] = true;
     handAtRef.current[p] = null;
     setTimeout(() => setMyHand(null), 260);
     busyRef.current[p] = false;
 
-    // Transition logic: simultaneous opener ends when both players have finished at least one full turn
-    // AND neither gets another turn (rumah continuation). If they do, they can click again.
-    // If the other player is still busy, do nothing — they'll trigger the final transition.
-    if (busyRef.current[1 - p]) {
-      // Other player still running; we just exit and they'll handle transition on their exit
-      return;
-    }
+    // Opener ends only when BOTH players have finished a non-rumah move.
+    // Until then, the un-done player can still click (cursor stays visible).
+    const bothDone = openerDoneRef.current[0] && openerDoneRef.current[1];
+    const anyBusy = busyRef.current[0] || busyRef.current[1];
+    if (!bothDone || anyBusy) return;
 
-    // Both done.
     // End-of-round check
     const p0Has = playerHasMoves(b, 0);
     const p1Has = playerHasMoves(b, 1);
@@ -2242,21 +2248,10 @@ function App() {
       return;
     }
 
-    // If either player got continuation (rumah), stay in opener-sim so they can click again
-    // We detect continuation by checking if this player wants to keep going. But we already broke out
-    // after `resolvedInOwnRumah`. Simpler: if THIS player resolved in rumah, keep them eligible in sim mode.
-    if (resolvedInOwnRumah && playerHasMoves(b, p)) {
-      // Stay in opener-sim; that player can click again.
-      return;
-    }
-
-    // No continuation → switch to alternating mode.
-    // Next player = the one who didn't resolve in rumah... but both are done. Choose based on who played last or default to 0.
+    // Switch to alternating for the remainder of the round.
+    openerDoneRef.current = {0: false, 1: false};
     setPhase('alternating');
     phaseRef.current = 'alternating';
-    // Determine starting player for the turn-based remainder:
-    // If exactly one resolved in rumah, they continue (but we already returned above if so).
-    // Otherwise default to P0 if has moves, else P1.
     const next = playerHasMoves(b, 0) ? 0 : 1;
     setCurrentPlayer(next);
     announceText('turn-based play begins', 1200);
