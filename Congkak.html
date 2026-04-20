@@ -25,6 +25,11 @@
     --seed-2: oklch(0.22 0.05 40);
     --accent: oklch(0.62 0.13 55);
     --gold: oklch(0.78 0.12 85);
+    /* Per-player hand skin tones — intentionally distinct */
+    --p1-skin: oklch(0.82 0.1 55);
+    --p1-skin-stroke: oklch(0.22 0.04 40);
+    --p2-skin: oklch(0.68 0.08 150);
+    --p2-skin-stroke: oklch(0.18 0.04 150);
     --shadow: 0 1px 2px rgba(40,25,15,0.08), 0 8px 24px rgba(40,25,15,0.08);
   }
   * { box-sizing: border-box; }
@@ -550,6 +555,25 @@
   .hand.flipped {
     transform: translate(-50%, -10%) rotate(180deg);
   }
+  /* Ghost hand: shown over the currently-selected hole when it's the player's turn */
+  .hand.ghost {
+    z-index: 18;
+    opacity: 0.78;
+    filter: drop-shadow(0 4px 6px oklch(0.15 0.04 40 / 0.35));
+    animation: ghostHover 1.6s ease-in-out infinite;
+    transition: left 0.18s cubic-bezier(.3,1.2,.3,1), top 0.18s cubic-bezier(.3,1.2,.3,1);
+  }
+  .hand.ghost.flipped {
+    animation: ghostHoverFlipped 1.6s ease-in-out infinite;
+  }
+  @keyframes ghostHover {
+    0%, 100% { transform: translate(-50%, -14%) scale(1); }
+    50%      { transform: translate(-50%, -22%) scale(1.02); }
+  }
+  @keyframes ghostHoverFlipped {
+    0%, 100% { transform: translate(-50%, -14%) rotate(180deg) scale(1); }
+    50%      { transform: translate(-50%, -22%) rotate(180deg) scale(1.02); }
+  }
   .hand-svg {
     width: 100%;
     height: 100%;
@@ -726,8 +750,16 @@
     font-family: 'Cormorant Garamond', serif;
     font-style: italic;
     font-size: 72px;
-    color: var(--accent);
-    text-shadow: 0 4px 24px oklch(0.62 0.13 55 / 0.4), 0 0 60px oklch(0.95 0.05 85 / 0.6);
+    font-weight: 600;
+    color: var(--cream);
+    text-align: center;
+    white-space: nowrap;
+    -webkit-text-stroke: 2px oklch(0.22 0.04 40);
+    paint-order: stroke fill;
+    text-shadow:
+      0 0 1px oklch(0.22 0.04 40),
+      0 4px 18px oklch(0.15 0.04 40 / 0.55),
+      0 0 40px oklch(0.62 0.13 55 / 0.5);
     pointer-events: none;
     z-index: 25;
     animation: announcePop 1.4s cubic-bezier(.2,1.4,.4,1) forwards;
@@ -779,8 +811,9 @@
 // EDIT MODE defaults (tweaks) — user-adjustable
 const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "seedsPerHole": 7,
-  "seedColor": "saffron",
-  "seedSize": 30
+  "seedColor": "ivory",
+  "seedSize": 30,
+  "startStyle": "simultaneous"
 }/*EDITMODE-END*/;
 </script>
 
@@ -1021,10 +1054,12 @@ function Rumah({ player, count, mine, win, captureFlash, animKey }) {
 
 // ========== MAIN APP ==========
 function App() {
-  const [tweaks, setTweaks] = useState(window.TWEAK_DEFAULTS || {seedsPerHole: 7, seedColor: "terracotta", seedSize: 22});
+  const [tweaks, setTweaks] = useState(window.TWEAK_DEFAULTS || {seedsPerHole: 7, seedColor: "terracotta", seedSize: 22, startStyle: "alternating"});
   const [seedsPerHole, setSeedsPerHole] = useState(tweaks.seedsPerHole || 7);
   const [seedColor, setSeedColor] = useState(tweaks.seedColor || 'terracotta');
   const [seedSize, setSeedSize] = useState(tweaks.seedSize || 22);
+  const [startStyle, setStartStyle] = useState(tweaks.startStyle || 'alternating');
+  const [roundMoveCount, setRoundMoveCount] = useState(0); // # of moves completed this round (total across both players)
   const [board, setBoard] = useState(() => makeInitialBoard(seedsPerHole));
   const [currentPlayer, setCurrentPlayer] = useState(0);
   const [activeHole, setActiveHole] = useState(null);
@@ -1039,9 +1074,19 @@ function App() {
   const [confetti, setConfetti] = useState([]);
   const [lastAction, setLastAction] = useState('Press a golden hole to begin');
   const [rumahFlash, setRumahFlash] = useState(new Set());
-  const [hand, setHand] = useState(null); // {x, y, carrying, player}
+  const [hand, setHand] = useState(null); // {x, y, carrying, player} — used in alternating mode
+  const [hands, setHands] = useState({0: null, 1: null}); // per-player hands for simultaneous mode
   const [flyingSeeds, setFlyingSeeds] = useState([]);
+  // Keyboard cursor: which hole each player is highlighting (null = none)
+  const [cursorHole, setCursorHole] = useState({0: null, 1: null});
   const boardWrapRef = useRef(null);
+  // Simultaneous-mode refs (shared across the two concurrent coroutines)
+  const boardRef = useRef(null);                // authoritative board in simultaneous mode
+  const handAtRef = useRef({0: null, 1: null}); // current stop of each active hand (for collision detection)
+  const busyRef = useRef({0: false, 1: false}); // whether each player's coroutine is currently sowing
+  const [phase, setPhase] = useState('alternating'); // 'opener-sim' | 'alternating'
+  const phaseRef = useRef('alternating');
+  const abortRef = useRef(0); // bumped on reset — running coroutines observe their captured token and bail
 
   // Compute a position (x,y in board-wrap px) for a given stop
   function positionFor(stop) {
@@ -1098,9 +1143,162 @@ function App() {
     }
   }, [seedSize]);
 
-  function resetGame(sph) {
+  // Persist start style
+  useEffect(() => {
+    if (startStyle !== tweaks.startStyle) {
+      setTweaks(t => ({...t, startStyle}));
+      window.parent.postMessage({type: '__edit_mode_set_keys', edits: {startStyle}}, '*');
+    }
+  }, [startStyle]);
+
+  // Announce turn changes (alternating phase only). Skip the very first mount.
+  const prevPlayerRef = useRef(null);
+  useEffect(() => {
+    const prev = prevPlayerRef.current;
+    prevPlayerRef.current = currentPlayer;
+    if (prev === null) return; // initial mount
+    if (prev === currentPlayer) return; // no change
+    if (winner != null) return;
+    if (phaseRef.current !== 'alternating') return;
+    announceText((currentPlayer === 0 ? 'Player 1' : 'Player 2') + "'s turn", 1000);
+  }, [currentPlayer, winner]);
+
+  // ---- Keyboard cursor helpers ----
+  // Player 0 row indices (visual left→right): 6,5,4,3,2,1,0 (so "right" in UI = decreasing idx)
+  // Player 1 row indices (visual left→right): 7,8,9,10,11,12,13
+  // But for keyboard we want LEFT/RIGHT to move along the visual row as the user sees it.
+  // P0 sits at bottom, reading L→R: [6,5,4,3,2,1,0]
+  // P1 sits at top rotated, reading L→R (from P2's own perspective): [13,12,11,10,9,8,7]
+  const p0Row = [6,5,4,3,2,1,0];         // visual L→R for P1 (bottom)
+  const p1Row = [13,12,11,10,9,8,7];     // visual L→R for P2 (top, from their POV)
+
+  function playableForPlayer(p) {
+    const row = p === 0 ? p0Row : p1Row;
+    return row.filter(i => board.holes[i] > 0);
+  }
+
+  function canPlayerAct(p) {
+    if (winner != null) return false;
+    if (phaseRef.current === 'opener-sim') {
+      // Each player acts independently — as long as they're not mid-sow
+      return !hands[p] && !busyRef.current[p];
+    } else {
+      return currentPlayer === p && !isAnimating;
+    }
+  }
+
+  function moveCursor(p, dir) {
+    // dir: -1 = left, +1 = right
+    const row = p === 0 ? p0Row : p1Row;
+    const playables = row.filter(i => board.holes[i] > 0);
+    if (playables.length === 0) return;
+    const cur = cursorHole[p];
+    let startPos = 0;
+    if (cur != null) {
+      const curIdx = row.indexOf(cur);
+      // Find nearest playable in `dir` direction
+      let next = curIdx;
+      for (let step = 1; step <= row.length; step++) {
+        next = (curIdx + dir * step + row.length) % row.length;
+        if (board.holes[row[next]] > 0) {
+          setCursorHole(prev => ({...prev, [p]: row[next]}));
+          return;
+        }
+      }
+    } else {
+      // Snap to first playable (leftmost)
+      setCursorHole(prev => ({...prev, [p]: playables[0]}));
+    }
+  }
+
+  function commitCursor(p) {
+    if (!canPlayerAct(p)) return;
+    const idx = cursorHole[p];
+    if (idx == null || board.holes[idx] === 0) {
+      // auto-pick first playable if no cursor
+      const row = p === 0 ? p0Row : p1Row;
+      const first = row.find(i => board.holes[i] > 0);
+      if (first != null) playMoveSafeRef.current && playMoveSafeRef.current(first);
+      return;
+    }
+    playMoveSafeRef.current && playMoveSafeRef.current(idx);
+  }
+
+  // Ref for playMoveSafe so keyboard effect can call it without stale closure
+  const playMoveSafeRef = useRef(null);
+
+  // Auto-place cursor when it's a player's turn and they have no cursor set
+  useEffect(() => {
+    [0, 1].forEach(p => {
+      if (canPlayerAct(p)) {
+        const row = p === 0 ? p0Row : p1Row;
+        const cur = cursorHole[p];
+        if (cur == null || board.holes[cur] === 0) {
+          const first = row.find(i => board.holes[i] > 0);
+          if (first != null) setCursorHole(prev => ({...prev, [p]: first}));
+        }
+      } else {
+        // Clear cursor when they can't act (so ghost hand disappears)
+        if (cursorHole[p] != null) setCursorHole(prev => ({...prev, [p]: null}));
+      }
+    });
+  }, [currentPlayer, isAnimating, hands, winner, phase, board]);
+
+  // Keyboard handler
+  useEffect(() => {
+    const onKey = (e) => {
+      // Modifier keys and typing targets: skip
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+      const tag = e.target.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || e.target.isContentEditable) return;
+      if (showRules || winner) return;
+
+      const key = e.key;
+      // If focus is on a button, keyboard Enter/Space would re-click it. Move focus off.
+      if (e.target && e.target.tagName === 'BUTTON' && (key === 'Enter' || key === ' ' || key === 'Spacebar')) {
+        e.target.blur();
+      }
+
+      const inAlt = phaseRef.current === 'alternating';
+
+      // Player 1 scheme: Arrow keys + Enter
+      const isP1Left = key === 'ArrowLeft';
+      const isP1Right = key === 'ArrowRight';
+      const isP1Commit = key === 'Enter';
+      // Player 2 scheme: A/D + Space
+      const isP2Left = key === 'a' || key === 'A';
+      const isP2Right = key === 'd' || key === 'D';
+      const isP2Commit = key === ' ' || key === 'Spacebar';
+
+      // In alternating mode: both schemes drive the current player
+      // In opener-sim mode: each scheme drives its own player
+      if (inAlt) {
+        const p = currentPlayer;
+        if (!canPlayerAct(p)) return;
+        if (isP1Left || isP2Left) { e.preventDefault(); moveCursor(p, -1); return; }
+        if (isP1Right || isP2Right) { e.preventDefault(); moveCursor(p, +1); return; }
+        if (isP1Commit || isP2Commit) { e.preventDefault(); commitCursor(p); return; }
+      } else {
+        // opener-sim
+        if (isP1Left)   { if (canPlayerAct(0)) { e.preventDefault(); moveCursor(0, -1); } return; }
+        if (isP1Right)  { if (canPlayerAct(0)) { e.preventDefault(); moveCursor(0, +1); } return; }
+        if (isP1Commit) { if (canPlayerAct(0)) { e.preventDefault(); commitCursor(0); } return; }
+        if (isP2Left)   { if (canPlayerAct(1)) { e.preventDefault(); moveCursor(1, -1); } return; }
+        if (isP2Right)  { if (canPlayerAct(1)) { e.preventDefault(); moveCursor(1, +1); } return; }
+        if (isP2Commit) { if (canPlayerAct(1)) { e.preventDefault(); commitCursor(1); } return; }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentPlayer, isAnimating, winner, showRules, phase, board, cursorHole, hands]);
+
+  function resetGame(sph, styleOverride) {
     const s = sph || seedsPerHole;
-    setBoard(makeInitialBoard(s));
+    const style = styleOverride || startStyle;
+    // Abort any in-flight coroutines
+    abortRef.current += 1;
+    const fresh = makeInitialBoard(s);
+    setBoard(fresh);
     setCurrentPlayer(0);
     setActiveHole(null);
     setCaptureFlashes(new Set());
@@ -1109,7 +1307,19 @@ function App() {
     setWinner(null);
     setAnnounce(null);
     setConfetti([]);
-    setLastAction('Fresh round. ' + (s * 14) + ' seeds on the board.');
+    setHand(null);
+    setHands({0: null, 1: null});
+    setFlyingSeeds([]);
+    setRumahFlash(new Set());
+    boardRef.current = {holes: [...fresh.holes], rumah: [...fresh.rumah]};
+    handAtRef.current = {0: null, 1: null};
+    busyRef.current = {0: false, 1: false};
+    const initialPhase = style === 'simultaneous' ? 'opener-sim' : 'alternating';
+    setPhase(initialPhase);
+    phaseRef.current = initialPhase;
+    setLastAction(initialPhase === 'opener-sim'
+      ? 'Simultaneous start — both players click to begin.'
+      : 'Fresh round. ' + (s * 14) + ' seeds on the board.');
     setAnimKey(k => k + 1);
   }
 
@@ -1295,11 +1505,17 @@ function App() {
   // Top row: index 7 = leftmost (nearest P0 rumah), 13 = rightmost. Render L->R -> [7..13]
   const topRange = [7,8,9,10,11,12,13];
 
-  const canBottomPlay = currentPlayer === 0 && !isAnimating && !winner;
-  const canTopPlay = currentPlayer === 1 && !isAnimating && !winner;
+  // In simultaneous-opener phase, both sides are playable independently (as long as that player isn't already sowing)
+  const inOpener = phase === 'opener-sim';
+  const canBottomPlay = inOpener
+    ? (!hands[0] && !winner)
+    : (currentPlayer === 0 && !isAnimating && !winner);
+  const canTopPlay = inOpener
+    ? (!hands[1] && !winner)
+    : (currentPlayer === 1 && !isAnimating && !winner);
 
-  const p0Active = currentPlayer === 0 && !winner;
-  const p1Active = currentPlayer === 1 && !winner;
+  const p0Active = inOpener ? !winner : (currentPlayer === 0 && !winner);
+  const p1Active = inOpener ? !winner : (currentPlayer === 1 && !winner);
 
   // Seed style palettes
   const SEED_PALETTES = {
@@ -1331,14 +1547,14 @@ function App() {
       </header>
 
       <div className="arena">
-        <div ref={boardWrapRef} className={"board-wrap" + (boardShake ? " shake" : "") + (hand ? " sowing" : "")}>
+        <div ref={boardWrapRef} className={"board-wrap" + (boardShake ? " shake" : "") + ((hand || hands[0] || hands[1]) ? " sowing" : "")}>
           {hand && (
-            <div className={"hand" + (hand.player === 1 ? " flipped" : "")} style={{ left: hand.x + 'px', top: hand.y + 'px' }}>
+            <div className={"hand" + (hand.player === 1 ? " flipped" : "") + (hand.bump ? " bump" : "")} style={{ left: hand.x + 'px', top: hand.y + 'px' }}>
               <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                 {/* Outer black outline - all fingers at similar height (cupped, not pointing) */}
-                <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180"/>
+                <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={hand.player === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
                 {/* Inner fill (skin tone) */}
-                <path fill={hand.player === 0 ? "oklch(0.82 0.09 60)" : "oklch(0.78 0.1 55)"} d="M20 200H60V220H80v60h20V100h40V200h20V120h40v80h20V140h40v80h20V160h20V180h20V320H300v60H280v40H120V380H100V340H80V300H60V260H40V240H20V200"/>
+                <path fill={hand.player === 0 ? 'var(--p1-skin)' : 'var(--p2-skin)'} d="M20 200H60V220H80v60h20V100h40V200h20V120h40v80h20V140h40v80h20V160h20V180h20V320H300v60H280v40H120V380H100V340H80V300H60V260H40V240H20V200"/>
               </svg>
               {hand.carrying >= 0 && (
                 <div className="hand-seeds">
@@ -1347,6 +1563,41 @@ function App() {
               )}
             </div>
           )}
+          {/* Simultaneous-mode: render up to two hands at once */}
+          {[0, 1].map(p => hands[p] && (
+            <div
+              key={"h-" + p}
+              className={"hand" + (p === 1 ? " flipped" : "") + (hands[p].bump ? " bump" : "")}
+              style={{ left: hands[p].x + 'px', top: hands[p].y + 'px' }}>
+              <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
+                <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
+                <path fill={p === 0 ? 'var(--p1-skin)' : 'var(--p2-skin)'} d="M20 200H60V220H80v60h20V100h40V200h20V120h40v80h20V140h40v80h20V160h20V180h20V320H300v60H280v40H120V380H100V340H80V300H60V260H40V240H20V200"/>
+              </svg>
+              {hands[p].carrying >= 0 && (
+                <div className="hand-seeds"><span>{hands[p].carrying}</span></div>
+              )}
+            </div>
+          ))}
+          {/* Ghost cursor hands — shown over each player's selected hole when they can act */}
+          {[0, 1].map(p => {
+            if (!canPlayerAct(p)) return null;
+            const idx = cursorHole[p];
+            if (idx == null) return null;
+            if (hands[p] || (p === currentPlayer && hand)) return null; // don't double-render during sowing
+            const pos = positionFor({type: 'hole', idx});
+            if (!pos) return null;
+            return (
+              <div
+                key={"ghost-" + p}
+                className={"hand ghost" + (p === 1 ? " flipped" : "")}
+                style={{ left: pos.x + 'px', top: pos.y - 40 + 'px' }}>
+                <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
+                  <path fill={p === 0 ? 'var(--p1-skin)' : 'var(--p2-skin)'} d="M20 200H60V220H80v60h20V100h40V200h20V120h40v80h20V140h40v80h20V160h20V180h20V320H300v60H280v40H120V380H100V340H80V300H60V260H40V240H20V200"/>
+                </svg>
+              </div>
+            );
+          })}
           {flyingSeeds.map(s => (
             <div
               key={s.id}
@@ -1571,6 +1822,13 @@ function App() {
             />
           </div>
           <div className="tweak-row">
+            <div className="tweak-label">Start style</div>
+            <div className="seed-choice" style={{gridTemplateColumns: '1fr 1fr'}}>
+              <button className={startStyle === 'simultaneous' ? 'active' : ''} onClick={() => { if (startStyle !== 'simultaneous') { setStartStyle('simultaneous'); resetGame(undefined, 'simultaneous'); } }}>Simultaneous</button>
+              <button className={startStyle === 'alternating' ? 'active' : ''} onClick={() => { if (startStyle !== 'alternating') { setStartStyle('alternating'); resetGame(undefined, 'alternating'); } }}>Alternating</button>
+            </div>
+          </div>
+          <div className="tweak-row">
             <div className="tweak-label">Round</div>
             <button className="btn" style={{width:'100%'}} onClick={() => resetGame()}>Reset board</button>
           </div>
@@ -1581,14 +1839,24 @@ function App() {
 
   // ===== Move handler (safe against rapid clicks) =====
   function playMoveSafe(startHole) {
-    playMoveV2(startHole);
+    if (phaseRef.current === 'opener-sim') {
+      const p = isOwnSide(startHole, 0) ? 0 : 1;
+      playMoveParallel(p, startHole);
+    } else {
+      playMoveV2(startHole);
+    }
   }
+  // Keep ref fresh so keyboard handler (registered once per deps change) can call it
+  useEffect(() => { playMoveSafeRef.current = playMoveSafe; });
 
   // ===== Correct playMove implementation =====
   async function playMoveV2(startHole) {
     if (isAnimating || winner != null) return;
     if (!isOwnSide(startHole, currentPlayer)) return;
     if (board.holes[startHole] === 0) return;
+
+    const myToken = abortRef.current;
+    const aborted = () => abortRef.current !== myToken;
 
     setIsAnimating(true);
     setShowRules(false);
@@ -1604,8 +1872,19 @@ function App() {
     let resolvedInOwnRumah = false;
     let passedOwnRumah = false;  // TIKAM requires passing own rumah at least once during this turn
 
+    const bailV2 = () => {
+      setIsAnimating(false);
+      setActiveHole(null);
+      setHand(null);
+      setCaptureFlashes(new Set());
+      setBoardShake(false);
+      setFlyingSeeds([]);
+      setRumahFlash(new Set());
+    };
+
     outer:
     while (true) {
+      if (aborted()) { bailV2(); return; }
       const count = b.holes[currentHole];
       b.holes[currentHole] = 0;
       setActiveHole(currentHole);
@@ -1615,6 +1894,7 @@ function App() {
       const pickPos = positionFor({type:'hole', idx: currentHole});
       if (pickPos) setHand({x: pickPos.x, y: pickPos.y - 40, carrying: count, player: p});
       await sleep(260);
+      if (aborted()) { bailV2(); return; }
 
       const path = sowPath(currentHole, p);
       let lastStop = null;
@@ -1628,6 +1908,7 @@ function App() {
         if (pos) setHand(h => ({...(h || {carrying, player: p}), x: pos.x, y: pos.y - 40, carrying}));
         // Wait for the hand to actually arrive
         await sleep(MOVE_MS + SETTLE_MS);
+        if (aborted()) { bailV2(); return; }
         // Now the hand is at the hole → drop seed, play sound, update count together
         if (stop.type === 'hole') {
           b.holes[stop.idx] += 1;
@@ -1647,7 +1928,7 @@ function App() {
       if (lastStop.type === 'rumah' && lastStop.p === p) {
         sfxRumah();
         setActiveHole(null);
-        announceText('another turn', 1100);
+        announceText((p === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
         setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
         resolvedInOwnRumah = true;
         break;
@@ -1668,7 +1949,7 @@ function App() {
               setBoardShake(true);
               sfxCapture();
               // Announce FIRST, then run the capture animation
-              announceText('tikam!', 1400);
+              announceText((p === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
               await sleep(650);
 
               // Launch flying seeds from both holes toward the capturing player's rumah
@@ -1766,6 +2047,242 @@ function App() {
       }
     }
     setCurrentPlayer(next);
+  }
+
+  // ===== Simultaneous-opener engine =====
+  // Both players can run concurrently. Shares boardRef.
+  async function playMoveParallel(p, startHole) {
+    if (winner != null) return;
+    if (busyRef.current[p]) return;
+    if (!isOwnSide(startHole, p)) return;
+    if (boardRef.current.holes[startHole] === 0) return;
+
+    const myToken = abortRef.current;
+    const aborted = () => abortRef.current !== myToken;
+    const bailP = () => {
+      busyRef.current[p] = false;
+      handAtRef.current[p] = null;
+      setHands(prev => ({ ...prev, [p]: null }));
+    };
+
+    busyRef.current[p] = true;
+    setShowRules(false);
+    try { getCtx(); } catch(e) {}
+
+    const b = boardRef.current;
+    let currentHole = startHole;
+    let resolvedInOwnRumah = false;
+    let passedOwnRumah = false;
+
+    // Small helpers with per-coroutine state
+    const setMyHand = (updater) => {
+      setHands(prev => {
+        const cur = prev[p];
+        const next = typeof updater === 'function' ? updater(cur) : updater;
+        return { ...prev, [p]: next };
+      });
+    };
+
+    // Collision: if the target stop matches the OTHER hand's current stop, wait until it moves
+    async function waitForPath(targetStop) {
+      const other = 1 - p;
+      let bumpShown = false;
+      while (busyRef.current[other] && handAtRef.current[other] && sameStop(handAtRef.current[other], targetStop)) {
+        if (!bumpShown) {
+          // show a bump animation on our hand briefly
+          setMyHand(h => h ? {...h, bump: true} : h);
+          sfxBump && sfxBump();
+          bumpShown = true;
+          await sleep(220);
+          setMyHand(h => h ? {...h, bump: false} : h);
+        } else {
+          await sleep(80);
+        }
+        if (winner != null) return;
+      }
+    }
+
+    outerSim:
+    while (true) {
+      if (aborted()) { bailP(); return; }
+      const count = b.holes[currentHole];
+      b.holes[currentHole] = 0;
+      setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+      handAtRef.current[p] = {type: 'hole', idx: currentHole};
+
+      const pickPos = positionFor({type:'hole', idx: currentHole});
+      if (pickPos) setMyHand({x: pickPos.x, y: pickPos.y - 40, carrying: count, player: p, bump: false});
+      await sleep(260);
+      if (aborted()) { bailP(); return; }
+
+      const path = sowPath(currentHole, p);
+      let lastStop = null;
+      let carrying = count;
+      const MOVE_MS = 220, SETTLE_MS = 40;
+      for (let i = 0; i < count; i++) {
+        const stop = path[i];
+
+        // Wait if the other hand is occupying the target stop
+        await waitForPath(stop);
+        if (aborted()) { bailP(); return; }
+        if (winner != null) { busyRef.current[p] = false; return; }
+
+        // Move to stop
+        const pos = positionFor(stop);
+        if (pos) setMyHand(h => ({...(h || {carrying, player: p}), x: pos.x, y: pos.y - 40, carrying, bump: false}));
+        handAtRef.current[p] = stop;
+        await sleep(MOVE_MS + SETTLE_MS);
+        if (aborted()) { bailP(); return; }
+
+        // Atomic drop
+        if (stop.type === 'hole') {
+          b.holes[stop.idx] += 1;
+        } else {
+          b.rumah[stop.p] += 1;
+          if (stop.p === p) passedOwnRumah = true;
+        }
+        carrying -= 1;
+        setMyHand(h => h ? {...h, carrying} : h);
+        setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+        sfxDrop();
+        await sleep(90);
+        lastStop = stop;
+      }
+
+      // Resolve end-of-chain
+      if (lastStop.type === 'rumah' && lastStop.p === p) {
+        sfxRumah();
+        announceText((p === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
+        setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
+        resolvedInOwnRumah = true;
+        break;
+      } else if (lastStop.type === 'hole') {
+        const lastIdx = lastStop.idx;
+        if (b.holes[lastIdx] > 1) {
+          currentHole = lastIdx;
+          await sleep(220);
+          continue;
+        } else {
+          if (isOwnSide(lastIdx, p) && passedOwnRumah) {
+            const oppIdx = opposite(lastIdx);
+            if (b.holes[oppIdx] > 0) {
+              // Capture atomically — hide hand
+              setMyHand(null);
+              handAtRef.current[p] = null;
+              const loot = b.holes[oppIdx] + b.holes[lastIdx];
+              setCaptureFlashes(new Set([lastIdx, oppIdx]));
+              setBoardShake(true);
+              sfxCapture();
+              announceText((p === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
+              await sleep(650);
+              const oppPos = positionFor({type:'hole', idx: oppIdx});
+              const landPos = positionFor({type:'hole', idx: lastIdx});
+              const rumahPos = positionFor({type:'rumah', p});
+              if (oppPos && landPos && rumahPos) {
+                const oppCount = b.holes[oppIdx], landCount = b.holes[lastIdx];
+                const fliers = [];
+                const baseId = Date.now() + '-' + p;
+                const jitter = () => (Math.random() - 0.5) * 24;
+                for (let i = 0; i < oppCount; i++) fliers.push({id: baseId+'-o-'+i, fromX: oppPos.x+jitter(), fromY: oppPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: i*55});
+                for (let i = 0; i < landCount; i++) fliers.push({id: baseId+'-l-'+i, fromX: landPos.x+jitter(), fromY: landPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: 200+i*55});
+                setFlyingSeeds(prev => [...prev, ...fliers]);
+                b.holes[oppIdx] = 0; b.holes[lastIdx] = 0;
+                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+                const totalDuration = 200 + Math.max(oppCount, landCount) * 55 + 900;
+                await sleep(totalDuration - 200);
+                b.rumah[p] += loot;
+                setRumahFlash(new Set([p]));
+                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+                await sleep(250);
+                setFlyingSeeds([]);
+              } else {
+                b.holes[oppIdx] = 0; b.holes[lastIdx] = 0; b.rumah[p] += loot;
+                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+              }
+              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + loot + ' seeds.');
+              await sleep(450);
+              setCaptureFlashes(new Set());
+              setBoardShake(false);
+              setRumahFlash(new Set());
+            } else {
+              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed empty — nothing across.');
+            }
+          } else if (isOwnSide(lastIdx, p) && !passedOwnRumah) {
+            setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed empty — no tikam (hadn’t passed rumah).');
+          } else {
+            setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
+          }
+          break;
+        }
+      }
+    }
+
+    // This coroutine finished. Clear its hand and position marker.
+    handAtRef.current[p] = null;
+    setTimeout(() => setMyHand(null), 260);
+    busyRef.current[p] = false;
+
+    // Transition logic: simultaneous opener ends when both players have finished at least one full turn
+    // AND neither gets another turn (rumah continuation). If they do, they can click again.
+    // If the other player is still busy, do nothing — they'll trigger the final transition.
+    if (busyRef.current[1 - p]) {
+      // Other player still running; we just exit and they'll handle transition on their exit
+      return;
+    }
+
+    // Both done.
+    // End-of-round check
+    const p0Has = playerHasMoves(b, 0);
+    const p1Has = playerHasMoves(b, 1);
+    if (!p0Has && !p1Has) {
+      const w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
+      setWinner({player: w, scores: [...b.rumah]});
+      if (w >= 0) { sfxWin(); burstConfetti(); }
+      return;
+    }
+
+    // If either player got continuation (rumah), stay in opener-sim so they can click again
+    // We detect continuation by checking if this player wants to keep going. But we already broke out
+    // after `resolvedInOwnRumah`. Simpler: if THIS player resolved in rumah, keep them eligible in sim mode.
+    if (resolvedInOwnRumah && playerHasMoves(b, p)) {
+      // Stay in opener-sim; that player can click again.
+      return;
+    }
+
+    // No continuation → switch to alternating mode.
+    // Next player = the one who didn't resolve in rumah... but both are done. Choose based on who played last or default to 0.
+    setPhase('alternating');
+    phaseRef.current = 'alternating';
+    // Determine starting player for the turn-based remainder:
+    // If exactly one resolved in rumah, they continue (but we already returned above if so).
+    // Otherwise default to P0 if has moves, else P1.
+    const next = playerHasMoves(b, 0) ? 0 : 1;
+    setCurrentPlayer(next);
+    announceText('turn-based play begins', 1200);
+  }
+
+  // Compare two stops
+  function sameStop(a, b) {
+    if (!a || !b) return false;
+    if (a.type !== b.type) return false;
+    if (a.type === 'hole') return a.idx === b.idx;
+    return a.p === b.p;
+  }
+
+  // Gentle bump sfx
+  function sfxBump() {
+    const ctx = getCtx(); if (!ctx) return;
+    const now = ctx.currentTime;
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(180, now);
+    osc.frequency.exponentialRampToValueAtTime(100, now + 0.08);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.1, now + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.12);
+    osc.connect(gain).connect(ctx.destination);
+    osc.start(now); osc.stop(now + 0.12);
   }
 }
 
