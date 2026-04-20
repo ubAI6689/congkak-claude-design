@@ -1224,8 +1224,11 @@ function App() {
     playMoveSafeRef.current && playMoveSafeRef.current(idx);
   }
 
-  // Ref for playMoveSafe so keyboard effect can call it without stale closure
+  // Ref for playMoveSafe so keyboard effect can call it without stale closure.
+  // playMoveSafe is declared after the JSX return (function declarations are hoisted),
+  // but we must assign the ref from a hook call that runs BEFORE the return.
   const playMoveSafeRef = useRef(null);
+  useEffect(() => { playMoveSafeRef.current = playMoveSafe; });
 
   // Auto-place cursor when it's a player's turn and they have no cursor set
   useEffect(() => {
@@ -1846,8 +1849,6 @@ function App() {
       playMoveV2(startHole);
     }
   }
-  // Keep ref fresh so keyboard handler (registered once per deps change) can call it
-  useEffect(() => { playMoveSafeRef.current = playMoveSafe; });
 
   // ===== Correct playMove implementation =====
   async function playMoveV2(startHole) {
