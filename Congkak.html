@@ -269,7 +269,6 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    overflow: hidden;
   }
   .rumah::before {
     content: "";
@@ -338,17 +337,7 @@
     opacity: 0.75;
     font-weight: 500;
   }
-  .rumah .seed-count {
-    position: static;
-    transform: none;
-    color: oklch(0.85 0.04 70 / 0.7);
-    font-size: 22px;
-    font-family: 'Cormorant Garamond', serif;
-    font-weight: 500;
-    font-style: italic;
-    letter-spacing: 0.05em;
-    mix-blend-mode: screen;
-  }
+  /* Rumah count uses the same styling as .hole .seed-count — positioned below. */
 
   /* In-hole seed clustering container */
   .seed-bed { position: absolute; inset: 12%; border-radius: 50%; }
