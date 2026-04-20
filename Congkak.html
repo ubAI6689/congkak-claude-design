@@ -867,22 +867,81 @@
     transition: top 0.4s cubic-bezier(.2,.9,.3,1.1), bottom 0.4s cubic-bezier(.2,.9,.3,1.1);
   }
 
+  /* On narrow landscape viewports, give the Controls panel and Tweaks panel some room. */
   @media (max-width: 760px) {
-    .board-wrap { aspect-ratio: 6.2 / 16; width: 80vw; }
-    .grid {
-      grid-template-columns: 1fr 1fr;
-      grid-template-rows: 11% 1fr 11%;
-      gap: 0;
-      padding: 2% 3%;
-    }
-    .rumah { grid-row: auto; grid-column: 1 / span 2; aspect-ratio: 1 / 0.6; width: 86%; border-radius: 40% / 46%; }
-    .hole { width: 70%; }
     .tweaks-panel { width: calc(100vw - 44px); }
+    .controls-panel { width: calc(100vw - 44px); max-width: 280px; }
+  }
+
+  /* Force landscape on mobile: show a rotate prompt in portrait. */
+  .rotate-prompt {
+    display: none;
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    background: var(--cream);
+    place-items: center;
+    text-align: center;
+    padding: 32px;
+  }
+  .rotate-prompt__inner {
+    max-width: 320px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 18px;
+  }
+  .rotate-prompt h2 {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 32px;
+    font-weight: 500;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  .rotate-prompt p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+  }
+  .rotate-prompt .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .rotate-icon {
+    width: 72px; height: 72px;
+    color: var(--ink-soft);
+    animation: rotateHint 2.4s ease-in-out infinite;
+  }
+  @keyframes rotateHint {
+    0%, 20%   { transform: rotate(0deg); }
+    50%, 70%  { transform: rotate(-90deg); }
+    100%      { transform: rotate(0deg); }
+  }
+  @media (max-width: 900px) and (orientation: portrait) {
+    .stage { display: none; }
+    .rotate-prompt { display: grid; }
   }
 </style>
 </head>
 <body>
 <div id="root"></div>
+
+<div class="rotate-prompt" aria-hidden="true">
+  <div class="rotate-prompt__inner">
+    <svg class="rotate-icon" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="14" y="6" width="20" height="36" rx="3" />
+      <path d="M22 38h4" />
+      <path d="M8 22 L12 18 L12 20 A18 18 0 0 1 40 34 L40 32 L44 36" opacity="0.55" />
+    </svg>
+    <div class="eyebrow">Congkak</div>
+    <h2>Rotate your device</h2>
+    <p>This game is best played in landscape orientation. Please rotate your phone to continue.</p>
+  </div>
+</div>
 
 <script>
 // EDIT MODE defaults (tweaks) — user-adjustable
