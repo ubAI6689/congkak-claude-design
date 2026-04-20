@@ -1,0 +1,46 @@
+{
+  "version": 1,
+  "timestamp": "2026-01-01T04:18:47.766Z",
+  "state": {
+    "seeds": [
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7,
+      7
+    ],
+    "topHouseSeeds": 0,
+    "lowHouseSeeds": 0,
+    "gameMode": "quick",
+    "gamePhase": "STARTING_PHASE",
+    "currentTurn": null,
+    "currentRound": 1,
+    "burntHolesUpper": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ],
+    "burntHolesLower": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  }
+}
