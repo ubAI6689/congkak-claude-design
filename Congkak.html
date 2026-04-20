@@ -1252,6 +1252,14 @@ function App() {
   const p0Row = [6,5,4,3,2,1,0];         // bottom row, screen L→R
   const p1Row = [7,8,9,10,11,12,13];     // top row, screen L→R
 
+  // Default cursor snap: P1 starts on their screen-rightmost playable hole (hole 0);
+  // P2 keeps the leftmost default. Used on initial placement and after a hole is emptied.
+  function defaultCursorHole(p) {
+    const row = p === 0 ? p0Row : p1Row;
+    const ordered = p === 0 ? [...row].reverse() : row;
+    return ordered.find(i => board.holes[i] > 0) ?? null;
+  }
+
   function playableForPlayer(p) {
     const row = p === 0 ? p0Row : p1Row;
     return row.filter(i => board.holes[i] > 0);
@@ -1288,8 +1296,8 @@ function App() {
         }
       }
     } else {
-      // Snap to first playable (leftmost)
-      setCursorHole(prev => ({...prev, [p]: playables[0]}));
+      const fallback = defaultCursorHole(p);
+      if (fallback != null) setCursorHole(prev => ({...prev, [p]: fallback}));
     }
   }
 
@@ -1297,10 +1305,8 @@ function App() {
     if (!canPlayerAct(p)) return;
     const idx = cursorHole[p];
     if (idx == null || board.holes[idx] === 0) {
-      // auto-pick first playable if no cursor
-      const row = p === 0 ? p0Row : p1Row;
-      const first = row.find(i => board.holes[i] > 0);
-      if (first != null) playMoveSafeRef.current && playMoveSafeRef.current(first);
+      const fallback = defaultCursorHole(p);
+      if (fallback != null) playMoveSafeRef.current && playMoveSafeRef.current(fallback);
       return;
     }
     playMoveSafeRef.current && playMoveSafeRef.current(idx);
@@ -1316,11 +1322,10 @@ function App() {
   useEffect(() => {
     [0, 1].forEach(p => {
       if (canPlayerAct(p)) {
-        const row = p === 0 ? p0Row : p1Row;
         const cur = cursorHole[p];
         if (cur == null || board.holes[cur] === 0) {
-          const first = row.find(i => board.holes[i] > 0);
-          if (first != null) setCursorHole(prev => ({...prev, [p]: first}));
+          const fallback = defaultCursorHole(p);
+          if (fallback != null) setCursorHole(prev => ({...prev, [p]: fallback}));
         }
       } else {
         // Clear cursor when they can't act (so ghost hand disappears)
