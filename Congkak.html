@@ -1167,13 +1167,10 @@ function App() {
   }, [currentPlayer, winner]);
 
   // ---- Keyboard cursor helpers ----
-  // Player 0 row indices (visual left→right): 6,5,4,3,2,1,0 (so "right" in UI = decreasing idx)
-  // Player 1 row indices (visual left→right): 7,8,9,10,11,12,13
-  // But for keyboard we want LEFT/RIGHT to move along the visual row as the user sees it.
-  // P0 sits at bottom, reading L→R: [6,5,4,3,2,1,0]
-  // P1 sits at top rotated, reading L→R (from P2's own perspective): [13,12,11,10,9,8,7]
-  const p0Row = [6,5,4,3,2,1,0];         // visual L→R for P1 (bottom)
-  const p1Row = [13,12,11,10,9,8,7];     // visual L→R for P2 (top, from their POV)
+  // Rows ordered by SCREEN left→right so "right" always moves the cursor rightward on screen,
+  // regardless of which player. (Single-user pass-and-play; both players face the same screen.)
+  const p0Row = [6,5,4,3,2,1,0];         // bottom row, screen L→R
+  const p1Row = [7,8,9,10,11,12,13];     // top row, screen L→R
 
   function playableForPlayer(p) {
     const row = p === 0 ? p0Row : p1Row;
