@@ -337,7 +337,16 @@
     opacity: 0.75;
     font-weight: 500;
   }
-  /* Rumah count uses the same styling as .hole .seed-count — positioned below. */
+  /* Rumah count uses hole's positioning (below), but its own serif italic styling. */
+  .rumah .seed-count {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 20px;
+    font-weight: 500;
+    font-style: italic;
+    letter-spacing: 0.05em;
+    color: oklch(0.35 0.03 50);
+    opacity: 0.9;
+  }
 
   /* In-hole seed clustering container */
   .seed-bed { position: absolute; inset: 12%; border-radius: 50%; }
