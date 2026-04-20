@@ -615,6 +615,85 @@
   /* hide native cursor over the board during sowing */
   .board-wrap.sowing { cursor: none; }
   .board-wrap.sowing .hole.playable { cursor: none; }
+
+  /* Controls guide (keyboard bindings) */
+  .controls-panel {
+    position: fixed;
+    bottom: 58px;
+    left: 22px;
+    background: oklch(1 0 0 / 0.94);
+    border: 1px solid oklch(0.22 0.02 50 / 0.12);
+    border-radius: 14px;
+    padding: 14px 16px 12px;
+    box-shadow: var(--shadow);
+    z-index: 30;
+    animation: slideUp 0.3s ease;
+    font-family: 'Plus Jakarta Sans', system-ui, sans-serif;
+    min-width: 220px;
+  }
+  .controls-panel .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    letter-spacing: 0.22em;
+    text-transform: uppercase;
+    color: var(--ink-soft);
+    margin-bottom: 10px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .controls-panel .eyebrow button {
+    all: unset;
+    cursor: pointer;
+    width: 18px; height: 18px;
+    display: grid; place-items: center;
+    border-radius: 50%;
+    color: var(--ink-soft);
+    transition: all 0.15s ease;
+  }
+  .controls-panel .eyebrow button:hover {
+    background: oklch(0.22 0.02 50 / 0.08);
+    color: var(--ink);
+  }
+  .controls-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    padding: 4px 0;
+  }
+  .controls-row + .controls-row {
+    border-top: 1px dashed oklch(0.22 0.02 50 / 0.1);
+    margin-top: 4px;
+    padding-top: 8px;
+  }
+  .controls-who {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 14px;
+    font-style: italic;
+    color: var(--ink);
+    min-width: 64px;
+  }
+  .controls-keys { display: flex; gap: 4px; align-items: center; }
+  kbd.key {
+    display: inline-grid;
+    place-items: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 5px;
+    border-radius: 5px;
+    border: 1px solid oklch(0.22 0.02 50 / 0.22);
+    border-bottom-width: 2px;
+    background: oklch(0.98 0.005 75);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10.5px;
+    font-weight: 500;
+    color: var(--ink);
+    box-shadow: 0 1px 0 oklch(0.22 0.02 50 / 0.08);
+  }
+  .controls-keys .sep { color: var(--ink-soft); opacity: 0.55; font-size: 10px; padding: 0 2px; }
+
   .tweaks-panel {
     position: fixed;
     bottom: 22px;
@@ -1069,6 +1148,7 @@ function App() {
   const [animKey, setAnimKey] = useState(0);
   const [showRules, setShowRules] = useState(true); // show on first load
   const [showTweaks, setShowTweaks] = useState(false);
+  const [showControls, setShowControls] = useState(true);
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
   const [confetti, setConfetti] = useState([]);
@@ -1275,14 +1355,20 @@ function App() {
       const isP2Right = key === 'd' || key === 'D';
       const isP2Commit = key === ' ' || key === 'Spacebar';
 
-      // In alternating mode: both schemes drive the current player
-      // In opener-sim mode: each scheme drives its own player
+      // Each player's scheme is exclusive: P1 keys only work on P1's turn, P2 keys on P2's turn.
+      // This applies in both alternating and opener-sim phases.
       if (inAlt) {
         const p = currentPlayer;
         if (!canPlayerAct(p)) return;
-        if (isP1Left || isP2Left) { e.preventDefault(); moveCursor(p, -1); return; }
-        if (isP1Right || isP2Right) { e.preventDefault(); moveCursor(p, +1); return; }
-        if (isP1Commit || isP2Commit) { e.preventDefault(); commitCursor(p); return; }
+        if (p === 0) {
+          if (isP1Left)   { e.preventDefault(); moveCursor(0, -1); return; }
+          if (isP1Right)  { e.preventDefault(); moveCursor(0, +1); return; }
+          if (isP1Commit) { e.preventDefault(); commitCursor(0); return; }
+        } else {
+          if (isP2Left)   { e.preventDefault(); moveCursor(1, -1); return; }
+          if (isP2Right)  { e.preventDefault(); moveCursor(1, +1); return; }
+          if (isP2Commit) { e.preventDefault(); commitCursor(1); return; }
+        }
       } else {
         // opener-sim
         if (isP1Left)   { if (canPlayerAct(0)) { e.preventDefault(); moveCursor(0, -1); } return; }
@@ -1547,6 +1633,7 @@ function App() {
         </div>
         <div className="topbar-actions">
           <button className="btn ghost" onClick={() => setShowRules(true)}>How to play</button>
+          <button className="btn ghost" onClick={() => setShowControls(v => !v)}>Controls</button>
           <button className="btn ghost" onClick={() => setShowTweaks(v => !v)}>Tweaks</button>
           <button className="btn" onClick={() => resetGame()}>New round</button>
         </div>
@@ -1778,6 +1865,36 @@ function App() {
             <div className="actions" style={{justifyContent:'center'}}>
               <button className="btn" onClick={() => setShowRules(true)}>Rules</button>
               <button className="btn primary" onClick={() => resetGame()}>Play again</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Controls guide */}
+      {showControls && (
+        <div className="controls-panel">
+          <div className="eyebrow">
+            <span>Keyboard</span>
+            <button onClick={() => setShowControls(false)} aria-label="hide controls">
+              <svg width="10" height="10" viewBox="0 0 12 12" fill="none"><path d="M2 2L10 10M10 2L2 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+            </button>
+          </div>
+          <div className="controls-row">
+            <span className="controls-who">Player One</span>
+            <div className="controls-keys">
+              <kbd className="key">←</kbd>
+              <kbd className="key">→</kbd>
+              <span className="sep">·</span>
+              <kbd className="key">Enter</kbd>
+            </div>
+          </div>
+          <div className="controls-row">
+            <span className="controls-who">Player Two</span>
+            <div className="controls-keys">
+              <kbd className="key">A</kbd>
+              <kbd className="key">D</kbd>
+              <span className="sep">·</span>
+              <kbd className="key">Space</kbd>
             </div>
           </div>
         </div>
