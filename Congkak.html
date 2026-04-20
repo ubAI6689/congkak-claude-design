@@ -2429,10 +2429,13 @@ function App() {
     }
 
     // Switch to alternating for the remainder of the round.
+    // `p` is the player whose coroutine just closed the opener (i.e. finished LAST).
+    // The first alternating turn goes to the OTHER player — they "waited", so they play next.
     openerDoneRef.current = {0: false, 1: false};
     setPhase('alternating');
     phaseRef.current = 'alternating';
-    const next = playerHasMoves(b, 0) ? 0 : 1;
+    const other = 1 - p;
+    const next = playerHasMoves(b, other) ? other : p;
     setCurrentPlayer(next);
     announceText('turn-based play begins', 1200);
   }
