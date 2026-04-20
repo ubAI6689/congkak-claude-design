@@ -1218,14 +1218,18 @@ function App() {
   const [cursorHole, setCursorHole] = useState({0: null, 1: null});
   const boardWrapRef = useRef(null);
   // Simultaneous-mode refs (shared across the two concurrent coroutines)
-  const boardRef = useRef(null);                // authoritative board in simultaneous mode
+  // Initialize boardRef with a real board so playMoveParallel can read it on first load
+  // (otherwise only resetGame() would initialize it, which isn't called on mount).
+  const boardRef = useRef(makeInitialBoard(tweaks.seedsPerHole || 7));
   const handAtRef = useRef({0: null, 1: null}); // current stop of each active hand (for collision detection)
   const busyRef = useRef({0: false, 1: false}); // whether each player's coroutine is currently sowing
   // In opener-sim: true once a player ends a move WITHOUT rumah continuation.
   // They must wait for the other to finish; then opener ends and we switch to alternating.
   const openerDoneRef = useRef({0: false, 1: false});
-  const [phase, setPhase] = useState('alternating'); // 'opener-sim' | 'alternating'
-  const phaseRef = useRef('alternating');
+  // Match initial phase to startStyle so the first round opens in the right mode.
+  const initialPhase = (tweaks.startStyle || 'alternating') === 'simultaneous' ? 'opener-sim' : 'alternating';
+  const [phase, setPhase] = useState(initialPhase); // 'opener-sim' | 'alternating'
+  const phaseRef = useRef(initialPhase);
   const abortRef = useRef(0); // bumped on reset — running coroutines observe their captured token and bail
 
   // Compute a position (x,y in board-wrap px) for a given stop
