@@ -92,6 +92,175 @@
     return false;
   }
 
+  // ---------- State ----------
+
+  // Produce an initial canonical state. `startStyle` is 'simultaneous' | 'alternating'.
+  function initialState(seedsPerHole, startStyle) {
+    return {
+      holes: Array.from({ length: 14 }, function () { return seedsPerHole; }),
+      rumah: [0, 0],
+      turn: 0, // P0 first in alternating; ignored in opener-sim
+      phase: startStyle === 'simultaneous' ? 'opener-sim' : 'alternating',
+      openerDone: [false, false],
+      seedsPerHole: seedsPerHole,
+      winner: null,
+      seq: 0,
+    };
+  }
+
+  function cloneBoard(state) {
+    return { holes: state.holes.slice(), rumah: state.rumah.slice() };
+  }
+
+  // ---------- Reducer ----------
+  //
+  // reducer(state, action) -> { state, events }
+  //
+  // Pure, deterministic, no side effects. Events describe WHAT happened;
+  // timing is the animator's concern. Reducer validates and returns the same
+  // state with a single { kind: 'invalid', reason } event on illegal moves.
+
+  function reducer(state, action) {
+    if (!action || typeof action !== 'object') {
+      return { state: state, events: [{ kind: 'invalid', reason: 'badAction' }] };
+    }
+    if (action.type === 'reset') {
+      return {
+        state: initialState(action.seedsPerHole || state.seedsPerHole, action.startStyle || 'alternating'),
+        events: [{ kind: 'reset' }],
+      };
+    }
+    if (action.type === 'play_move' && state.phase === 'alternating') {
+      return playMoveAlternating(state, action.player, action.hole);
+    }
+    // opener-sim actions land in Phase 1.5; stub for now
+    return { state: state, events: [{ kind: 'invalid', reason: 'unknownAction' }] };
+  }
+
+  // Alternating-mode single move. Mirrors playMoveV2's logic exactly
+  // (including the chain-while-non-empty, tikam-requires-passed-rumah rule,
+  // and "next player skipping if opponent has no moves" rule).
+  function playMoveAlternating(state, player, startHole) {
+    // Validate
+    if (state.winner) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'gameOver' }] };
+    }
+    if (state.turn !== player) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'notYourTurn' }] };
+    }
+    if (!isOwnSide(startHole, player)) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'notOwnSide' }] };
+    }
+    if (state.holes[startHole] === 0) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'emptyHole' }] };
+    }
+
+    var b = cloneBoard(state);
+    var events = [];
+    var currentHole = startHole;
+    var resolvedInOwnRumah = false;
+    var passedOwnRumah = false;
+
+    // Chain loop: keep sowing while the last seed lands in a non-empty hole.
+    // Bounded to prevent infinite loops if logic is ever wrong.
+    for (var chain = 0; chain < 40; chain++) {
+      var count = b.holes[currentHole];
+      b.holes[currentHole] = 0;
+      events.push({ kind: 'pickup', player: player, hole: currentHole, count: count });
+
+      var path = sowPath(currentHole, player);
+      var lastStop = null;
+      for (var i = 0; i < count; i++) {
+        var stop = path[i];
+        if (stop.type === 'hole') {
+          b.holes[stop.idx] += 1;
+        } else {
+          b.rumah[stop.p] += 1;
+          if (stop.p === player) passedOwnRumah = true;
+        }
+        events.push({ kind: 'drop', player: player, at: stop });
+        lastStop = stop;
+      }
+
+      if (lastStop.type === 'rumah' && lastStop.p === player) {
+        events.push({ kind: 'anotherTurn', player: player });
+        resolvedInOwnRumah = true;
+        break;
+      }
+      if (lastStop.type === 'hole') {
+        var lastIdx = lastStop.idx;
+        if (b.holes[lastIdx] > 1) {
+          // Non-empty before our drop (now > 1) → chain continues
+          currentHole = lastIdx;
+          continue;
+        }
+        // Landed with exactly 1 seed → empty before drop
+        if (isOwnSide(lastIdx, player)) {
+          var oppIdx = opposite(lastIdx);
+          if (b.holes[oppIdx] > 0 && passedOwnRumah) {
+            var loot = b.holes[oppIdx] + b.holes[lastIdx];
+            events.push({
+              kind: 'tikam',
+              player: player,
+              landedHole: lastIdx,
+              oppHole: oppIdx,
+              oppCount: b.holes[oppIdx],
+              landCount: b.holes[lastIdx],
+              loot: loot,
+            });
+            b.holes[oppIdx] = 0;
+            b.holes[lastIdx] = 0;
+            b.rumah[player] += loot;
+          } else if (b.holes[oppIdx] > 0 && !passedOwnRumah) {
+            events.push({ kind: 'noCapture', player: player, reason: 'notPassedRumah' });
+          } else {
+            events.push({ kind: 'noCapture', player: player, reason: 'opponentEmpty' });
+          }
+        } else {
+          events.push({ kind: 'mati', player: player });
+        }
+        break;
+      }
+    }
+
+    // End-of-round check
+    var p0Has = playerHasMoves(b, 0);
+    var p1Has = playerHasMoves(b, 1);
+    var winner = null;
+    var nextPlayer;
+
+    if (!p0Has && !p1Has) {
+      var w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
+      winner = { player: w, scores: b.rumah.slice() };
+      events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
+      nextPlayer = state.turn; // moot — game over
+    } else {
+      if (resolvedInOwnRumah) {
+        nextPlayer = playerHasMoves(b, player) ? player : (1 - player);
+      } else {
+        nextPlayer = 1 - player;
+        if (!playerHasMoves(b, nextPlayer)) {
+          nextPlayer = playerHasMoves(b, player) ? player : nextPlayer;
+        }
+      }
+      events.push({ kind: 'turnEnd', nextPlayer: nextPlayer });
+    }
+
+    return {
+      state: {
+        holes: b.holes,
+        rumah: b.rumah,
+        turn: nextPlayer,
+        phase: state.phase,
+        openerDone: state.openerDone.slice(),
+        seedsPerHole: state.seedsPerHole,
+        winner: winner,
+        seq: state.seq + 1,
+      },
+      events: events,
+    };
+  }
+
   // ---------- Exports ----------
 
   var CongkakEngine = {
@@ -100,6 +269,8 @@
     isOwnSide: isOwnSide,
     opposite: opposite,
     playerHasMoves: playerHasMoves,
+    initialState: initialState,
+    reducer: reducer,
   };
 
   if (typeof module === 'object' && module.exports) {
