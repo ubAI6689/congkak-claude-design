@@ -10,6 +10,7 @@
 <script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
 <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="./engine.js"></script>
 <style>
   :root {
     --cream: oklch(0.96 0.015 75);
@@ -1047,52 +1048,10 @@ function sfxWin() {
 //   rumah[0] = bottom player's store
 //   Player 1 (top) holes: indices 7..13    (sowing direction: 7 -> 13, then into rumah[1], then back to 0..6)
 //   rumah[1] = top player's store
-
-function makeInitialBoard(seedsPer) {
-  return {
-    holes: [...Array(14)].map(() => seedsPer),
-    rumah: [0, 0],
-  };
-}
-
-// Given current player p (0 or 1) and a hole index h, return array of sowing positions (in order).
-// Positions are either {type: 'hole', idx} or {type: 'rumah', p}.
-function sowPath(fromIdx, player) {
-  // Clockwise ring (viewed from above, P0 at bottom, P0 rumah at screen-LEFT, P1 rumah at screen-RIGHT).
-  // Bottom row 0..6 runs right→left (0=rightmost, 6=leftmost nearest P0 rumah).
-  // Top row 7..13 runs left→right (7=leftmost nearest P0 rumah, 13=rightmost nearest P1 rumah).
-  // Clockwise traversal: bottom (0→6) → rumah0 (left) → top (7→13) → rumah1 (right) → back to 0.
-  // Player 0 includes rumah0, skips rumah1. Player 1 includes rumah1, skips rumah0.
-  const ring = [
-    {type:'hole',idx:0},{type:'hole',idx:1},{type:'hole',idx:2},{type:'hole',idx:3},
-    {type:'hole',idx:4},{type:'hole',idx:5},{type:'hole',idx:6},
-    {type:'rumah',p:0},
-    {type:'hole',idx:7},{type:'hole',idx:8},{type:'hole',idx:9},{type:'hole',idx:10},
-    {type:'hole',idx:11},{type:'hole',idx:12},{type:'hole',idx:13},
-    {type:'rumah',p:1},
-  ];
-  const start = ring.findIndex(n => n.type === 'hole' && n.idx === fromIdx);
-  const path = [];
-  for (let i = 1; i <= 100; i++) {
-    const n = ring[(start + i) % ring.length];
-    if (n.type === 'rumah' && n.p !== player) continue;
-    path.push(n);
-  }
-  return path;
-}
-
-function isOwnSide(idx, player) {
-  return player === 0 ? (idx >= 0 && idx <= 6) : (idx >= 7 && idx <= 13);
-}
-function opposite(idx) {
-  // bottom 0..6 opposite top 13..7 (i.e. 0<->13, 1<->12, 2<->11, 3<->10, 4<->9, 5<->8, 6<->7)
-  return 13 - idx;
-}
-
-function playerHasMoves(board, p) {
-  const range = p === 0 ? [0,1,2,3,4,5,6] : [7,8,9,10,11,12,13];
-  return range.some(i => board.holes[i] > 0);
-}
+//
+// Pure game helpers live in engine.js (loaded as ./engine.js — see <head>).
+// Destructured here so the rest of this file reads unchanged.
+const { makeInitialBoard, sowPath, isOwnSide, opposite, playerHasMoves } = window.CongkakEngine;
 
 // ========== BOARD COMPONENT ==========
 function SeedsInHole({ count, seeds }) {

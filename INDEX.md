@@ -1,6 +1,8 @@
 # Congkak.html — structure index
 
-Single-file React app (React 18 UMD + Babel standalone via CDN), 2294 lines. Use `Read` with `offset`/`limit` on the ranges below instead of reading the whole file.
+Single-file React app (React 18 UMD + Babel standalone via CDN). Use `Read` with `offset`/`limit` on the ranges below instead of reading the whole file.
+
+Pure game helpers live in **`engine.js`** (classic script, attaches to `window.CongkakEngine`, also `require`-able in Node). As of Phase 1 commit 1, the helpers `makeInitialBoard`, `sowPath`, `isOwnSide`, `opposite`, `playerHasMoves` moved there. The line ranges below reflect the post-extraction file.
 
 ## High-level layout
 
@@ -51,11 +53,7 @@ Single-file React app (React 18 UMD + Babel standalone via CDN), 2294 lines. Use
 | 860–874 | `sfxCapture()` |
 | 876–889 | `sfxRumah()` |
 | 891–905 | `sfxWin()` |
-| 914–919 | `makeInitialBoard(seedsPer)` |
-| 923–945 | `sowPath(fromIdx, player)` — ring of 16 stops (14 holes + 2 rumah), skips opponent rumah |
-| 947–949 | `isOwnSide(idx, player)` |
-| 950–953 | `opposite(idx)` — `13 - idx` |
-| 955–958 | `playerHasMoves(board, p)` |
+| — | `makeInitialBoard`, `sowPath`, `isOwnSide`, `opposite`, `playerHasMoves` — moved to **`engine.js`**. Destructured from `window.CongkakEngine` near the top of the Babel script. |
 
 ## JS — components (961–1053)
 
