@@ -25,11 +25,11 @@
     --seed-2: oklch(0.22 0.05 40);
     --accent: oklch(0.62 0.13 55);
     --gold: oklch(0.78 0.12 85);
-    /* Per-player hand skin tones — intentionally distinct */
+    /* Per-player hand skin tones — distinct and colorblind-safe (orange + blue pair) */
     --p1-skin: oklch(0.82 0.1 55);
     --p1-skin-stroke: oklch(0.22 0.04 40);
-    --p2-skin: oklch(0.68 0.08 150);
-    --p2-skin-stroke: oklch(0.18 0.04 150);
+    --p2-skin: oklch(0.72 0.11 235);
+    --p2-skin-stroke: oklch(0.24 0.06 245);
     --shadow: 0 1px 2px rgba(40,25,15,0.08), 0 8px 24px rgba(40,25,15,0.08);
   }
   * { box-sizing: border-box; }
@@ -331,11 +331,12 @@
     bottom: -22px; left: 50%;
     transform: translateX(-50%);
     font-family: 'JetBrains Mono', monospace;
-    font-size: 11px;
-    color: oklch(0.35 0.03 50);
+    font-size: 12px;
+    color: oklch(0.88 0.04 75);
     font-variant-numeric: tabular-nums;
-    opacity: 0.75;
-    font-weight: 500;
+    opacity: 0.95;
+    font-weight: 600;
+    text-shadow: 0 1px 2px oklch(0.15 0.04 40 / 0.6);
   }
   /* Rumah count uses hole's positioning (below), but its own serif italic styling. */
   .rumah .seed-count {
