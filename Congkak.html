@@ -1471,151 +1471,8 @@ function App() {
   }
 
   // ========== MOVE LOGIC ==========
-  async function playMove(startHole) {
-    if (isAnimating || winner != null) return;
-    if (!isOwnSide(startHole, currentPlayer)) return;
-    if (board.holes[startHole] === 0) return;
-
-    setIsAnimating(true);
-    setShowRules(false);
-
-    // Mutable working copy
-    const b = {
-      holes: [...board.holes],
-      rumah: [...board.rumah],
-    };
-    let p = currentPlayer;
-
-    // Loop: keep sowing while last seed lands in own rumah OR in a non-empty hole (on own side continues via "chain" rule)
-    // Malay Congkak variant chosen here: You pick up and sow anticlockwise. If you land in your own rumah, you get another turn.
-    // If you land in a non-empty hole (either side, except rumah), you pick those up and continue sowing.
-    // If you land in an empty hole on YOUR side, you capture the opposite hole's seeds (and your last seed).
-    // If you land in an empty hole on OPPONENT'S side, your turn ends with no capture ("mati").
-
-    let currentHole = startHole;
-    let ended = false;
-    let captured = false;
-
-    while (!ended) {
-      const count = b.holes[currentHole];
-      b.holes[currentHole] = 0;
-      setActiveHole(currentHole);
-      setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-      await sleep(200);
-
-      const path = sowPath(currentHole, p);
-      let lastStop = null;
-      for (let i = 0; i < count; i++) {
-        const stop = path[i];
-        if (stop.type === 'hole') {
-          b.holes[stop.idx] += 1;
-        } else {
-          b.rumah[stop.p] += 1;
-        }
-        setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-        setActiveHole(stop.type === 'hole' ? stop.idx : null);
-        sfxDrop();
-        await sleep(180);
-        lastStop = stop;
-      }
-
-      // Analyse stop
-      if (lastStop.type === 'rumah' && lastStop.p === p) {
-        // another turn — same player, but must pick a new hole
-        sfxRumah();
-        setActiveHole(null);
-        announceText('another turn', 1100);
-        setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
-        ended = true;
-        // Don't switch players
-      } else if (lastStop.type === 'hole') {
-        const lastIdx = lastStop.idx;
-        if (b.holes[lastIdx] > 1) {
-          // Non-empty hole: pick up and continue
-          currentHole = lastIdx;
-          await sleep(240);
-          continue;
-        } else {
-          // Last seed landed in an empty hole (b.holes[lastIdx] === 1 means it had 0 before our drop)
-          if (isOwnSide(lastIdx, p)) {
-            // Capture!
-            const oppIdx = opposite(lastIdx);
-            const loot = b.holes[oppIdx] + b.holes[lastIdx];
-            if (b.holes[oppIdx] > 0) {
-              // Flash
-              setCaptureFlashes(new Set([lastIdx, oppIdx]));
-              setBoardShake(true);
-              sfxCapture();
-              await sleep(450);
-              b.holes[oppIdx] = 0;
-              b.holes[lastIdx] = 0;
-              b.rumah[p] += loot;
-              setRumahFlash(new Set([p]));
-              setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-              announceText('tangkap!', 1200);
-              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' captured ' + loot + ' seeds.');
-              captured = true;
-              await sleep(500);
-              setCaptureFlashes(new Set());
-              setBoardShake(false);
-              setRumahFlash(new Set());
-            } else {
-              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed in an empty hole — nothing to capture.');
-            }
-          } else {
-            // Landed on opponent's empty hole — "mati"
-            setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
-          }
-          ended = true;
-        }
-      }
-    }
-
-    setActiveHole(null);
-    setIsAnimating(false);
-
-    // Check end conditions
-    const p0Has = playerHasMoves(b, 0);
-    const p1Has = playerHasMoves(b, 1);
-    if (!p0Has && !p1Has) {
-      // Round over; determine winner based on rumah counts
-      const w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
-      setWinner({player: w, scores: [...b.rumah]});
-      if (w >= 0) { sfxWin(); burstConfetti(); }
-      return;
-    }
-
-    // Next turn
-    let next = p;
-    if (lastActionWasRumah()) {
-      // keep same player (but only if they have moves; else skip)
-      if (!playerHasMoves(b, next)) next = 1 - next;
-    } else {
-      next = 1 - p;
-      if (!playerHasMoves(b, next)) {
-        // opponent stuck — skip back to us if we have moves
-        if (playerHasMoves(b, p)) next = p;
-      }
-    }
-    setCurrentPlayer(next);
-  }
-
-  // We need to know if the very last resolved move gave another turn.
-  // Simpler: inside playMove the logic already handled "ended" flagging — so post-loop we only get here when ended=true.
-  // But to decide next player, we need to know whether the last stop was in own rumah. Refactor: track it in state via ref.
-  const lastRumahRef = useRef(false);
-  function lastActionWasRumah() { return lastRumahRef.current; }
-
-  // Rewrite playMove to use lastRumahRef — simpler to do it inline with a small tweak:
-  // (keeping single function by setting ref inside)
-  // Patch: set ref wherever we landed in own rumah.
-  // (See adjustments above: we'll adjust in a follow-up.)
-
-  // Utility
+  // sleep helper shared by the animator.
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-  // Actually — to keep things clean, I'll reimplement playMove to correctly handle "another turn" via ref.
-  // We'll override below.
 
   // ========== RENDER ==========
   // Bottom row: index 0 = rightmost, 6 = leftmost (nearest P0 rumah on left). Render L->R -> [6..0]
@@ -1996,31 +1853,22 @@ function App() {
     }
   }
 
-  // ===== Correct playMove implementation =====
-  async function playMoveV2(startHole) {
-    if (isAnimating || winner != null) return;
-    if (!isOwnSide(startHole, currentPlayer)) return;
-    if (board.holes[startHole] === 0) return;
+  // ===== Animator =====
+  // Consumes the event list from engine.reducer() and drives all DOM/sound/hand
+  // side effects. Does NOT compute game logic. `aborted()` lets the caller
+  // cancel mid-animation (e.g. on reset).
+  async function animateEvents(events, initialBoard, player, aborted) {
+    // Working board copy for incremental renders. The animator mutates this as
+    // it replays events, calling setBoard() after each delta.
+    const b = { holes: [...initialBoard.holes], rumah: [...initialBoard.rumah] };
 
-    const myToken = abortRef.current;
-    const aborted = () => abortRef.current !== myToken;
+    const PICKUP_MS = 260;
+    const MOVE_MS = 220;
+    const SETTLE_MS = 40;
+    const DROP_AFTER_MS = 90;
+    const CHAIN_WAIT_MS = 220;
 
-    setIsAnimating(true);
-    setShowRules(false);
-    try { getCtx(); } catch(e) {}
-
-    const b = {
-      holes: [...board.holes],
-      rumah: [...board.rumah],
-    };
-    const p = currentPlayer;
-
-    let currentHole = startHole;
-    let resolvedInOwnRumah = false;
-    let passedOwnRumah = false;  // TIKAM requires passing own rumah at least once during this turn
-
-    const bailV2 = () => {
-      setIsAnimating(false);
+    const bailAnim = () => {
       setActiveHole(null);
       setHand(null);
       setCaptureFlashes(new Set());
@@ -2029,171 +1877,162 @@ function App() {
       setRumahFlash(new Set());
     };
 
-    outer:
-    while (true) {
-      if (aborted()) { bailV2(); return; }
-      const count = b.holes[currentHole];
-      b.holes[currentHole] = 0;
-      setActiveHole(currentHole);
-      setBoard({holes: [...b.holes], rumah: [...b.rumah]});
+    let prevWasDrop = false;
 
-      // Position hand above the picked hole with all seeds
-      const pickPos = positionFor({type:'hole', idx: currentHole});
-      if (pickPos) setHand({x: pickPos.x, y: pickPos.y - 40, carrying: count, player: p});
-      await sleep(260);
-      if (aborted()) { bailV2(); return; }
+    for (let i = 0; i < events.length; i++) {
+      if (aborted()) { bailAnim(); return; }
+      const ev = events[i];
 
-      const path = sowPath(currentHole, p);
-      let lastStop = null;
-      let carrying = count;
-      const MOVE_MS = 220;  // hand travel
-      const SETTLE_MS = 40; // visual settle before drop
-      for (let i = 0; i < count; i++) {
-        const stop = path[i];
-        // Move hand to the stop
-        const pos = positionFor(stop);
-        if (pos) setHand(h => ({...(h || {carrying, player: p}), x: pos.x, y: pos.y - 40, carrying}));
-        // Wait for the hand to actually arrive
-        await sleep(MOVE_MS + SETTLE_MS);
-        if (aborted()) { bailV2(); return; }
-        // Now the hand is at the hole → drop seed, play sound, update count together
-        if (stop.type === 'hole') {
-          b.holes[stop.idx] += 1;
-        } else {
-          b.rumah[stop.p] += 1;
-          if (stop.p === p) passedOwnRumah = true;
+      if (ev.kind === 'pickup') {
+        // If a chain continuation (drop → pickup back-to-back), brief pause.
+        if (prevWasDrop) {
+          await sleep(CHAIN_WAIT_MS);
+          if (aborted()) { bailAnim(); return; }
         }
-        carrying -= 1;
-        setHand(h => h ? {...h, carrying} : h);
-        setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-        setActiveHole(stop.type === 'hole' ? stop.idx : null);
+        b.holes[ev.hole] = 0;
+        setActiveHole(ev.hole);
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        const pos = positionFor({ type: 'hole', idx: ev.hole });
+        if (pos) setHand({ x: pos.x, y: pos.y - 40, carrying: ev.count, player: ev.player });
+        await sleep(PICKUP_MS);
+        prevWasDrop = false;
+      } else if (ev.kind === 'drop') {
+        const pos = positionFor(ev.at);
+        if (pos) setHand(h => ({ ...(h || { player: ev.player }), x: pos.x, y: pos.y - 40 }));
+        await sleep(MOVE_MS + SETTLE_MS);
+        if (aborted()) { bailAnim(); return; }
+        if (ev.at.type === 'hole') {
+          b.holes[ev.at.idx] += 1;
+        } else {
+          b.rumah[ev.at.p] += 1;
+        }
+        setHand(h => h ? { ...h, carrying: (h.carrying != null ? h.carrying - 1 : h.carrying) } : h);
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        setActiveHole(ev.at.type === 'hole' ? ev.at.idx : null);
         sfxDrop();
-        await sleep(90);
-        lastStop = stop;
-      }
-
-      if (lastStop.type === 'rumah' && lastStop.p === p) {
+        await sleep(DROP_AFTER_MS);
+        prevWasDrop = true;
+      } else if (ev.kind === 'anotherTurn') {
         sfxRumah();
         setActiveHole(null);
-        announceText((p === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
-        setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
-        resolvedInOwnRumah = true;
-        break;
-      } else if (lastStop.type === 'hole') {
-        const lastIdx = lastStop.idx;
-        if (b.holes[lastIdx] > 1) {
-          currentHole = lastIdx;
-          await sleep(220);
-          continue;
-        } else {
-          if (isOwnSide(lastIdx, p)) {
-            const oppIdx = opposite(lastIdx);
-            const loot = b.holes[oppIdx] + b.holes[lastIdx];
-            if (b.holes[oppIdx] > 0 && passedOwnRumah) {
-              // Hide the hand immediately — tikam takes over
-              setHand(null);
-              setCaptureFlashes(new Set([lastIdx, oppIdx]));
-              setBoardShake(true);
-              sfxCapture();
-              // Announce FIRST, then run the capture animation
-              announceText((p === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
-              await sleep(650);
+        announceText((ev.player === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
+        setLastAction((ev.player === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'tikam') {
+        setHand(null);
+        setCaptureFlashes(new Set([ev.landedHole, ev.oppHole]));
+        setBoardShake(true);
+        sfxCapture();
+        announceText((ev.player === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
+        await sleep(650);
+        if (aborted()) { bailAnim(); return; }
 
-              // Launch flying seeds from both holes toward the capturing player's rumah
-              const oppPos = positionFor({type:'hole', idx: oppIdx});
-              const landPos = positionFor({type:'hole', idx: lastIdx});
-              const rumahPos = positionFor({type:'rumah', p});
-              if (oppPos && landPos && rumahPos) {
-                const oppCount = b.holes[oppIdx];
-                const landCount = b.holes[lastIdx];
-                const newFliers = [];
-                const baseId = Date.now();
-                // jitter helper
-                const jitter = () => (Math.random() - 0.5) * 24;
-                for (let i = 0; i < oppCount; i++) {
-                  newFliers.push({
-                    id: baseId + '-o-' + i,
-                    fromX: oppPos.x + jitter(),
-                    fromY: oppPos.y + jitter(),
-                    toX: rumahPos.x + jitter(),
-                    toY: rumahPos.y + jitter(),
-                    delay: i * 55,
-                  });
-                }
-                for (let i = 0; i < landCount; i++) {
-                  newFliers.push({
-                    id: baseId + '-l-' + i,
-                    fromX: landPos.x + jitter(),
-                    fromY: landPos.y + jitter(),
-                    toX: rumahPos.x + jitter(),
-                    toY: rumahPos.y + jitter(),
-                    delay: 200 + i * 55,
-                  });
-                }
-                setFlyingSeeds(newFliers);
-                // Empty the source holes immediately so the flying seeds appear "lifted"
-                b.holes[oppIdx] = 0;
-                b.holes[lastIdx] = 0;
-                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-                // Wait for last seed to arrive, then credit rumah
-                const totalDuration = 200 + Math.max(oppCount, landCount) * 55 + 900;
-                await sleep(totalDuration - 200);
-                b.rumah[p] += loot;
-                setRumahFlash(new Set([p]));
-                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-                await sleep(250);
-                setFlyingSeeds([]);
-              } else {
-                // fallback if positions not found
-                b.holes[oppIdx] = 0;
-                b.holes[lastIdx] = 0;
-                b.rumah[p] += loot;
-                setRumahFlash(new Set([p]));
-                setBoard({holes: [...b.holes], rumah: [...b.rumah]});
-              }
-
-              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + loot + ' seeds.');
-              await sleep(450);
-              setCaptureFlashes(new Set());
-              setBoardShake(false);
-              setRumahFlash(new Set());
-            } else if (b.holes[oppIdx] > 0 && !passedOwnRumah) {
-              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed empty — but hadn’t passed their rumah yet. No tikam.');
-            } else {
-              setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' landed empty — nothing across.');
-            }
-          } else {
-            setLastAction((p === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
+        const oppPos = positionFor({ type: 'hole', idx: ev.oppHole });
+        const landPos = positionFor({ type: 'hole', idx: ev.landedHole });
+        const rumahPos = positionFor({ type: 'rumah', p: ev.player });
+        if (oppPos && landPos && rumahPos) {
+          const fliers = [];
+          const baseId = Date.now();
+          const jitter = () => (Math.random() - 0.5) * 24;
+          for (let k = 0; k < ev.oppCount; k++) {
+            fliers.push({
+              id: baseId + '-o-' + k,
+              fromX: oppPos.x + jitter(), fromY: oppPos.y + jitter(),
+              toX: rumahPos.x + jitter(), toY: rumahPos.y + jitter(),
+              delay: k * 55,
+            });
           }
-          break;
+          for (let k = 0; k < ev.landCount; k++) {
+            fliers.push({
+              id: baseId + '-l-' + k,
+              fromX: landPos.x + jitter(), fromY: landPos.y + jitter(),
+              toX: rumahPos.x + jitter(), toY: rumahPos.y + jitter(),
+              delay: 200 + k * 55,
+            });
+          }
+          setFlyingSeeds(fliers);
+          b.holes[ev.oppHole] = 0;
+          b.holes[ev.landedHole] = 0;
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          const totalDuration = 200 + Math.max(ev.oppCount, ev.landCount) * 55 + 900;
+          await sleep(totalDuration - 200);
+          if (aborted()) { bailAnim(); return; }
+          b.rumah[ev.player] += ev.loot;
+          setRumahFlash(new Set([ev.player]));
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          await sleep(250);
+          setFlyingSeeds([]);
+        } else {
+          b.holes[ev.oppHole] = 0;
+          b.holes[ev.landedHole] = 0;
+          b.rumah[ev.player] += ev.loot;
+          setRumahFlash(new Set([ev.player]));
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
         }
+        setLastAction((ev.player === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + ev.loot + ' seeds.');
+        await sleep(450);
+        setCaptureFlashes(new Set());
+        setBoardShake(false);
+        setRumahFlash(new Set());
+        prevWasDrop = false;
+      } else if (ev.kind === 'noCapture') {
+        const who = ev.player === 0 ? 'Player One' : 'Player Two';
+        setLastAction(ev.reason === 'notPassedRumah'
+          ? who + ' landed empty — but hadn’t passed their rumah yet. No tikam.'
+          : who + ' landed empty — nothing across.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'mati') {
+        setLastAction((ev.player === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
+        prevWasDrop = false;
       }
+      // turnEnd / roundEnd are applied by the caller after animation finishes.
     }
+  }
 
+  // ===== Alternating-mode move: validate, reduce, animate, commit =====
+  async function playMoveV2(startHole) {
+    if (isAnimating || winner != null) return;
+
+    // Assemble the canonical state from React hooks and call the pure reducer.
+    const stateSnapshot = {
+      holes: board.holes,
+      rumah: board.rumah,
+      turn: currentPlayer,
+      phase: 'alternating',
+      openerDone: [openerDoneRef.current[0], openerDoneRef.current[1]],
+      seedsPerHole: seedsPerHole,
+      winner: winner,
+      seq: 0,
+    };
+    const action = { type: 'play_move', player: currentPlayer, hole: startHole };
+    const result = window.CongkakEngine.reducer(stateSnapshot, action);
+
+    // Invalid moves: cheap bail, no animation.
+    if (result.events.length === 1 && result.events[0].kind === 'invalid') return;
+
+    const myToken = abortRef.current;
+    const aborted = () => abortRef.current !== myToken;
+
+    setIsAnimating(true);
+    setShowRules(false);
+    try { getCtx(); } catch (e) {}
+
+    // Animate. The animator mutates its own working copy and calls setBoard as it goes.
+    await animateEvents(result.events, stateSnapshot, currentPlayer, aborted);
+    if (aborted()) { setIsAnimating(false); return; }
+
+    // Commit authoritative final state from the reducer.
+    setBoard({ holes: result.state.holes, rumah: result.state.rumah });
     setActiveHole(null);
     setIsAnimating(false);
-    // Clear the hand with a short delay so the final drop registers visually
     setTimeout(() => setHand(null), 280);
 
-    const p0Has = playerHasMoves(b, 0);
-    const p1Has = playerHasMoves(b, 1);
-    if (!p0Has && !p1Has) {
-      const w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
-      setWinner({player: w, scores: [...b.rumah]});
-      if (w >= 0) { sfxWin(); burstConfetti(); }
-      return;
-    }
-
-    let next;
-    if (resolvedInOwnRumah) {
-      next = playerHasMoves(b, p) ? p : (1 - p);
+    if (result.state.winner) {
+      setWinner(result.state.winner);
+      if (result.state.winner.player >= 0) { sfxWin(); burstConfetti(); }
     } else {
-      next = 1 - p;
-      if (!playerHasMoves(b, next)) {
-        next = playerHasMoves(b, p) ? p : next;
-      }
+      setCurrentPlayer(result.state.turn);
     }
-    setCurrentPlayer(next);
   }
 
   // ===== Simultaneous-opener engine =====

@@ -119,9 +119,8 @@ Pure game helpers live in **`engine.js`** (classic script, attaches to `window.C
 | 1326–1329 | `changeSeeds(n)` |
 | 1332–1335 | `announceText(txt, durationMs)` |
 | 1338–1353 | `burstConfetti()` |
-| 1356–1483 | **`playMove` (LEGACY — dead code, superseded by `playMoveV2`)** |
-| 1488–1489 | `lastRumahRef` / `lastActionWasRumah` (legacy remnants) |
-| 1497 | `sleep(ms)` |
+| — | Legacy `playMove` / `lastRumahRef` / `lastActionWasRumah` — **removed** in Phase 1.3. |
+| (line drift) | `sleep(ms)` helper — near the start of "MOVE LOGIC" section |
 | 1502–1534 | Render variables: ranges, active/playable flags, `SEED_PALETTES`, `stageStyle` |
 
 ### JSX render (1536–1838)
@@ -148,13 +147,14 @@ Pure game helpers live in **`engine.js`** (classic script, attaches to `window.C
 
 | Range | Symbol |
 |---|---|
-| 1841–1848 | `playMoveSafe(startHole)` — dispatcher (routes to V2 or Parallel) |
-| 1850 | Effect: keep `playMoveSafeRef` fresh |
-| 1853–2050 | **`playMoveV2(startHole)`** — alternating-mode engine (hand animation, sowing loop, tikam rule, end-of-round, next-player logic). Tikam requires `passedOwnRumah`. |
-| 2054–2262 | **`playMoveParallel(p, startHole)`** — simultaneous-opener engine (concurrent coroutines, `boardRef` authority, collision detection via `waitForPath`, transition to alternating) |
-| 2087–2103 | `waitForPath(targetStop)` — collision wait w/ bump |
-| 2265–2270 | `sameStop(a, b)` |
-| 2273–2286 | `sfxBump()` |
+| — | `playMoveSafe(startHole)` — dispatcher (routes to V2 or Parallel) |
+| — | Effect: keep `playMoveSafeRef` fresh (near state init) |
+| — | **`animateEvents(events, initialBoard, player, aborted)`** — Phase 1.3 addition. Consumes reducer events, drives DOM/sound/hand. No game logic. |
+| — | **`playMoveV2(startHole)`** — alternating. Phase 1.3 rewrite: validate → `CongkakEngine.reducer` → `animateEvents` → commit final state from reducer. |
+| — | **`playMoveParallel(p, startHole)`** — simultaneous-opener engine (concurrent coroutines, `boardRef` authority, collision detection via `waitForPath`). **Not yet refactored** — still contains inline animation+logic. Phase 1.5 target. |
+| — | `waitForPath(targetStop)` — collision wait w/ bump (inside playMoveParallel) |
+| — | `sameStop(a, b)` |
+| — | `sfxBump()` |
 
 ## Key constants & rules
 
