@@ -133,8 +133,241 @@
     if (action.type === 'play_move' && state.phase === 'alternating') {
       return playMoveAlternating(state, action.player, action.hole);
     }
-    // opener-sim actions land in Phase 1.5; stub for now
+    if (action.type === 'opener_round' && state.phase === 'opener-sim') {
+      return openerRound(state, action.picks);
+    }
     return { state: state, events: [{ kind: 'invalid', reason: 'unknownAction' }] };
+  }
+
+  // ---------- Opener-sim (commit-and-reveal) ----------
+  //
+  // Action: { type: 'opener_round', picks: [holeA|null, holeB|null] }
+  //   - picks[p] is the hole player p chose to sow this round, or null if
+  //     player p is already done (openerDone[p] === true).
+  //
+  // Simulates both hands tick-by-tick. Each tick, both active hands try to
+  // drop at their next path stop. Collision (both target same hole): lower
+  // seat (player 0) drops; higher seat bumps (stays, emits a bump event,
+  // retries same target next tick).
+  //
+  // A hand's sowing may internally chain (last seed lands in a non-empty
+  // non-rumah hole → pick up, continue) within the same round. The round
+  // ends for a hand when it terminates with one of: rumah continuation
+  // (anotherTurn), tikam, noCapture, or mati.
+  //
+  // openerDone[p] becomes true unless the hand ended in anotherTurn.
+  // When both openerDone are true, phase transitions to 'alternating'.
+
+  function sameStop(a, b) {
+    if (!a || !b) return false;
+    if (a.type !== b.type) return false;
+    if (a.type === 'hole') return a.idx === b.idx;
+    return a.p === b.p;
+  }
+
+  function openerRound(state, picks) {
+    if (!picks || picks.length !== 2) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'badPicks' }] };
+    }
+    if (state.winner) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'gameOver' }] };
+    }
+    // Validate picks
+    for (var p = 0; p < 2; p++) {
+      var pick = picks[p];
+      if (state.openerDone[p]) {
+        if (pick != null) return { state: state, events: [{ kind: 'invalid', reason: 'alreadyDone' }] };
+      } else {
+        if (pick == null) return { state: state, events: [{ kind: 'invalid', reason: 'missingPick' }] };
+        if (!isOwnSide(pick, p)) return { state: state, events: [{ kind: 'invalid', reason: 'notOwnSide' }] };
+        if (state.holes[pick] === 0) return { state: state, events: [{ kind: 'invalid', reason: 'emptyHole' }] };
+      }
+    }
+
+    var b = cloneBoard(state);
+    var events = [];
+
+    // Per-hand state
+    var hands = [null, null];
+    for (var p2 = 0; p2 < 2; p2++) {
+      if (picks[p2] == null) continue;
+      var count = b.holes[picks[p2]];
+      b.holes[picks[p2]] = 0;
+      hands[p2] = {
+        player: p2,
+        currentHole: picks[p2],
+        carrying: count,
+        path: sowPath(picks[p2], p2),
+        pathIdx: 0,
+        passedOwnRumah: false,
+        done: false,
+        result: null, // 'anotherTurn' | 'tikam' | 'noCaptureNotPassed' | 'noCaptureOppEmpty' | 'mati'
+      };
+      events.push({ kind: 'pickup', player: p2, hole: picks[p2], count: count });
+    }
+
+    // Tick loop: both hands advance in lockstep until both done.
+    // Bounded to prevent pathological infinite loops.
+    var MAX_TICKS = 500;
+    for (var tick = 0; tick < MAX_TICKS; tick++) {
+      var anyActive = false;
+      for (var q = 0; q < 2; q++) {
+        if (hands[q] && !hands[q].done) { anyActive = true; break; }
+      }
+      if (!anyActive) break;
+
+      // Compute each active hand's target this tick (next path stop)
+      var targets = [null, null];
+      for (var r = 0; r < 2; r++) {
+        if (hands[r] && !hands[r].done && hands[r].carrying > 0) {
+          targets[r] = hands[r].path[hands[r].pathIdx];
+        }
+      }
+
+      // Collision: both targets point to same stop
+      var collision = targets[0] && targets[1] && sameStop(targets[0], targets[1]);
+
+      for (var s = 0; s < 2; s++) {
+        if (!targets[s]) continue;
+        if (collision && s === 1) {
+          // Higher-seat bumps, lower-seat drops. Hand stays put, retries next tick.
+          events.push({ kind: 'bump', player: s, at: targets[s] });
+          continue;
+        }
+        // Drop
+        var stop = targets[s];
+        if (stop.type === 'hole') {
+          b.holes[stop.idx] += 1;
+        } else {
+          b.rumah[stop.p] += 1;
+          if (stop.p === s) hands[s].passedOwnRumah = true;
+        }
+        events.push({ kind: 'drop', player: s, at: stop });
+        hands[s].carrying -= 1;
+        hands[s].pathIdx += 1;
+
+        // Terminal analysis if this was the last drop in hand
+        if (hands[s].carrying === 0) {
+          analyzeEndOfSow(b, hands[s], events);
+          // If result was a chain, hand continues with a new pickup/path (not done)
+        }
+      }
+    }
+
+    // Update openerDone flags based on each hand's result
+    var newOpenerDone = state.openerDone.slice();
+    for (var t = 0; t < 2; t++) {
+      if (hands[t] && hands[t].result !== 'anotherTurn') {
+        newOpenerDone[t] = true;
+      }
+    }
+
+    // End-of-round check
+    var p0Has = playerHasMoves(b, 0);
+    var p1Has = playerHasMoves(b, 1);
+    var winner = null;
+    var newPhase = state.phase;
+    var newTurn = state.turn;
+
+    if (!p0Has && !p1Has) {
+      var w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
+      winner = { player: w, scores: b.rumah.slice() };
+      events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
+    } else if (newOpenerDone[0] && newOpenerDone[1]) {
+      // Both players finished opener → switch to alternating.
+      // Starting turn: pick the player who was NOT active this round if possible
+      // (so whoever finished "earlier" conceptually waits). If both were active,
+      // default to the higher-seat (so P1 plays first in alternating, giving P0
+      // who "went first" in opener a brief rest). Adjust if round-end detection
+      // shows a single-active round.
+      newPhase = 'alternating';
+      var bothActive = picks[0] != null && picks[1] != null;
+      if (bothActive) {
+        newTurn = playerHasMoves(b, 1) ? 1 : 0;
+      } else if (picks[0] != null) {
+        newTurn = playerHasMoves(b, 1) ? 1 : 0;
+      } else {
+        newTurn = playerHasMoves(b, 0) ? 0 : 1;
+      }
+      events.push({ kind: 'phaseChange', from: 'opener-sim', to: 'alternating' });
+      events.push({ kind: 'turnEnd', nextPlayer: newTurn });
+    } else {
+      events.push({ kind: 'openerRoundEnd', openerDone: newOpenerDone });
+    }
+
+    return {
+      state: {
+        holes: b.holes,
+        rumah: b.rumah,
+        turn: newTurn,
+        phase: newPhase,
+        openerDone: newOpenerDone,
+        seedsPerHole: state.seedsPerHole,
+        winner: winner,
+        seq: state.seq + 1,
+      },
+      events: events,
+    };
+  }
+
+  // Analyze the terminal stop of a hand that just dropped its last seed.
+  // Mutates `b` on tikam (captures seeds), sets `hand.result` and `hand.done`.
+  // On chain continuation, sets up the hand for its next sowing (not done).
+  function analyzeEndOfSow(b, hand, events) {
+    // Find the last drop stop from the hand's path (pathIdx points PAST the last drop)
+    var lastStop = hand.path[hand.pathIdx - 1];
+    var p = hand.player;
+
+    if (lastStop.type === 'rumah' && lastStop.p === p) {
+      events.push({ kind: 'anotherTurn', player: p });
+      hand.result = 'anotherTurn';
+      hand.done = true;
+      return;
+    }
+    if (lastStop.type === 'hole') {
+      var lastIdx = lastStop.idx;
+      if (b.holes[lastIdx] > 1) {
+        // Chain: pick up and continue from this hole
+        var pickupCount = b.holes[lastIdx];
+        b.holes[lastIdx] = 0;
+        hand.currentHole = lastIdx;
+        hand.carrying = pickupCount;
+        hand.path = sowPath(lastIdx, p);
+        hand.pathIdx = 0;
+        events.push({ kind: 'pickup', player: p, hole: lastIdx, count: pickupCount });
+        return;
+      }
+      // Landed in empty hole (now has exactly 1 from our drop)
+      if (isOwnSide(lastIdx, p)) {
+        var oppIdx = opposite(lastIdx);
+        if (b.holes[oppIdx] > 0 && hand.passedOwnRumah) {
+          var loot = b.holes[oppIdx] + b.holes[lastIdx];
+          events.push({
+            kind: 'tikam',
+            player: p,
+            landedHole: lastIdx,
+            oppHole: oppIdx,
+            oppCount: b.holes[oppIdx],
+            landCount: b.holes[lastIdx],
+            loot: loot,
+          });
+          b.holes[oppIdx] = 0;
+          b.holes[lastIdx] = 0;
+          b.rumah[p] += loot;
+          hand.result = 'tikam';
+        } else if (b.holes[oppIdx] > 0) {
+          events.push({ kind: 'noCapture', player: p, reason: 'notPassedRumah' });
+          hand.result = 'noCaptureNotPassed';
+        } else {
+          events.push({ kind: 'noCapture', player: p, reason: 'opponentEmpty' });
+          hand.result = 'noCaptureOppEmpty';
+        }
+      } else {
+        events.push({ kind: 'mati', player: p });
+        hand.result = 'mati';
+      }
+      hand.done = true;
+    }
   }
 
   // Alternating-mode single move. Mirrors playMoveV2's logic exactly
