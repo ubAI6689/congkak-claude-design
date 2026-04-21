@@ -1166,6 +1166,13 @@ function App() {
   const [showRules, setShowRules] = useState(true); // show on first load
   const [showTweaks, setShowTweaks] = useState(false);
   const [showControls, setShowControls] = useState(true);
+  // ===== Multiplayer (Phase 3: lobby only) =====
+  // 'local' = single-device. 'online-lobby' = modal open, pre-room. 'online' = in a room.
+  const [netMode, setNetMode] = useState('local');
+  const [netStatus, setNetStatus] = useState('idle'); // idle | connecting | connected | error
+  const [netRoom, setNetRoom] = useState(null); // { code, seat, clientId, peers }
+  const [netError, setNetError] = useState(null);
+  const netWsRef = useRef(null);
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
   const [confetti, setConfetti] = useState([]);
@@ -1445,6 +1452,75 @@ function App() {
     resetGame(n);
   }
 
+  // ===== Multiplayer connection helpers (Phase 3: presence only) =====
+  function netConnect() {
+    if (netWsRef.current && netWsRef.current.readyState <= 1) return netWsRef.current;
+    setNetStatus('connecting');
+    setNetError(null);
+    const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    const ws = new WebSocket(url);
+    netWsRef.current = ws;
+    ws.addEventListener('open', () => setNetStatus('connected'));
+    ws.addEventListener('close', () => {
+      setNetStatus('idle');
+      if (netWsRef.current === ws) netWsRef.current = null;
+    });
+    ws.addEventListener('error', () => {
+      setNetStatus('error');
+      setNetError('connection failed');
+    });
+    ws.addEventListener('message', (ev) => {
+      let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === 'room_joined') {
+        setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
+        setNetMode('online');
+      } else if (msg.type === 'room_update') {
+        setNetRoom(prev => prev ? { ...prev, peers: msg.peers } : prev);
+      } else if (msg.type === 'room_error') {
+        setNetError(msg.reason || 'room error');
+        setNetStatus('error');
+      }
+    });
+    return ws;
+  }
+  function netSend(obj) {
+    const ws = netWsRef.current;
+    if (!ws || ws.readyState !== 1) return false;
+    ws.send(JSON.stringify(obj));
+    return true;
+  }
+  function netCreateRoom() {
+    setNetError(null);
+    const ws = netConnect();
+    const attempt = () => netSend({ type: 'create_room' }) || setTimeout(attempt, 100);
+    if (ws.readyState === 1) netSend({ type: 'create_room' });
+    else ws.addEventListener('open', () => netSend({ type: 'create_room' }), { once: true });
+  }
+  function netJoinRoom(code) {
+    if (!code) return;
+    setNetError(null);
+    const ws = netConnect();
+    const payload = { type: 'join_room', code: code.toUpperCase() };
+    if (ws.readyState === 1) netSend(payload);
+    else ws.addEventListener('open', () => netSend(payload), { once: true });
+  }
+  function netLeaveRoom() {
+    netSend({ type: 'leave_room' });
+    setNetRoom(null);
+    setNetMode('local');
+  }
+
+  // Auto-join from URL param on first load: ?room=ABCDEF
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const code = params.get('room');
+    if (code && netMode === 'local') {
+      setNetMode('online-lobby');
+      netJoinRoom(code);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Announce helper
   function announceText(txt, durationMs = 1400) {
     setAnnounce({txt, id: Date.now()});
@@ -1517,6 +1593,15 @@ function App() {
           <button className="btn ghost" onClick={() => setShowRules(true)}>How to play</button>
           <button className="btn ghost" onClick={() => setShowControls(v => !v)}>Controls</button>
           <button className="btn ghost" onClick={() => setShowTweaks(v => !v)}>Tweaks</button>
+          {netMode === 'local' && (
+            <button className="btn ghost" onClick={() => setNetMode('online-lobby')}>Play online</button>
+          )}
+          {netMode !== 'local' && netRoom && (
+            <span className="btn ghost" style={{pointerEvents:'none'}}>
+              Room <strong style={{fontFamily:"'JetBrains Mono', monospace"}}>{netRoom.code}</strong>
+              {' · '}{netRoom.peers && netRoom.peers[1 - netRoom.seat]?.connected ? 'opponent ✓' : 'waiting…'}
+            </span>
+          )}
           <button className="btn" onClick={() => resetGame()}>New round</button>
         </div>
       </header>
@@ -1723,6 +1808,65 @@ function App() {
               <button className="btn primary" onClick={() => setShowRules(false)}>Begin</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Online lobby modal */}
+      {netMode === 'online-lobby' && (
+        <div className="overlay" onClick={(e) => { if (e.target.classList.contains('overlay')) { netLeaveRoom(); } }}>
+          <div className="modal" style={{position:'relative', maxWidth: 480}}>
+            <button className="btn ghost modal-close" onClick={() => { netLeaveRoom(); }}>close</button>
+            <div className="eyebrow">Play online</div>
+            <h2>Create or <em>join</em> a room</h2>
+            <p style={{marginTop: 12, marginBottom: 18}}>
+              Multiplayer is still alpha. Game state isn't synced yet — this just proves the
+              connection. Share the room code with a friend or open it in another tab.
+            </p>
+            <div style={{display:'grid', gap: 14, marginTop: 12}}>
+              <button className="btn primary" style={{padding: '12px 20px'}} onClick={netCreateRoom}>Create new room</button>
+              <div style={{display:'flex', gap: 8}}>
+                <input
+                  type="text"
+                  placeholder="ROOM CODE"
+                  maxLength={6}
+                  style={{flex:1, padding:'10px 14px', fontFamily:"'JetBrains Mono', monospace", fontSize:15, letterSpacing:'0.15em', textTransform:'uppercase', borderRadius:8, border:'1px solid oklch(0.22 0.02 50 / 0.18)', background:'oklch(1 0 0 / 0.5)'}}
+                  onKeyDown={(e) => { if (e.key === 'Enter') netJoinRoom(e.currentTarget.value.trim()); }}
+                  id="lobby-code-input"
+                />
+                <button className="btn" onClick={() => {
+                  const el = document.getElementById('lobby-code-input');
+                  netJoinRoom(el ? el.value.trim() : '');
+                }}>Join</button>
+              </div>
+              {netStatus === 'connecting' && <div style={{color:'var(--ink-soft)', fontSize:13}}>connecting…</div>}
+              {netError && <div style={{color:'#a02020', fontSize:13}}>error: {netError}</div>}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* In-room status panel (Phase 3: presence only) */}
+      {netMode === 'online' && netRoom && (
+        <div style={{position:'fixed', top: 70, right: 22, zIndex: 30, background:'oklch(1 0 0 / 0.94)', border:'1px solid oklch(0.22 0.02 50 / 0.12)', borderRadius: 14, padding:'12px 14px', minWidth: 220, boxShadow: 'var(--shadow)'}}>
+          <div style={{fontFamily:"'JetBrains Mono', monospace", fontSize:10, letterSpacing:'0.22em', textTransform:'uppercase', color:'var(--ink-soft)', marginBottom:8, display:'flex', justifyContent:'space-between', alignItems:'center'}}>
+            <span>Room</span>
+            <button style={{all:'unset', cursor:'pointer', fontSize:11, color:'var(--ink-soft)'}} onClick={netLeaveRoom}>leave</button>
+          </div>
+          <div style={{fontFamily:"'JetBrains Mono', monospace", fontSize:22, fontWeight:600, letterSpacing:'0.18em', marginBottom:8}}>{netRoom.code}</div>
+          <div style={{fontSize:11, color:'var(--ink-soft)', marginBottom:10}}>
+            You are <strong>seat {netRoom.seat}</strong> ({netRoom.seat === 0 ? 'Player One' : 'Player Two'})
+          </div>
+          <div style={{display:'flex', gap:10, fontSize:12}}>
+            {netRoom.peers && netRoom.peers.map(p => (
+              <div key={p.seat} style={{flex:1, padding:'6px 8px', borderRadius:6, background: p.connected ? 'oklch(0.85 0.08 150 / 0.25)' : 'oklch(0.22 0.02 50 / 0.06)', color: p.connected ? 'oklch(0.3 0.08 150)' : 'var(--ink-soft)', textAlign:'center'}}>
+                seat {p.seat} {p.connected ? '✓' : '…'}
+              </div>
+            ))}
+          </div>
+          <button className="btn ghost" style={{width:'100%', marginTop:10, fontSize:11}} onClick={() => {
+            const url = location.origin + location.pathname + '?room=' + netRoom.code;
+            navigator.clipboard?.writeText(url);
+          }}>Copy invite link</button>
         </div>
       )}
 
