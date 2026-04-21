@@ -1,0 +1,22 @@
+[Unit]
+Description=Congkak WebSocket relay
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/congkak-server
+ExecStart=/usr/bin/node /opt/congkak-server/server.js
+Restart=on-failure
+RestartSec=3
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8787
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

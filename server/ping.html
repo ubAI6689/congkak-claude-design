@@ -1,0 +1,62 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8"/>
+<title>Congkak WS Ping</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<style>
+  body { font-family: system-ui, sans-serif; background: #f6f0e4; color: #2a2420; margin: 0; padding: 24px; }
+  h1 { font-weight: 500; font-size: 20px; margin: 0 0 16px; }
+  .row { padding: 8px 0; border-bottom: 1px solid rgba(0,0,0,0.1); font-family: 'JetBrains Mono', monospace; font-size: 13px; }
+  .ok { color: #2a6e2a; }
+  .bad { color: #a02020; }
+  button { padding: 10px 18px; font-size: 14px; background: #2a2420; color: #f6f0e4; border: 0; border-radius: 8px; cursor: pointer; }
+  #log { margin-top: 16px; }
+</style>
+</head>
+<body>
+  <h1>Congkak WebSocket ping test</h1>
+  <p style="font-size: 13px; color: #645d58;">Connects to <code>wss://congkak.ubaidrac.xyz/ws</code>, sends a ping, waits for pong, measures RTT.</p>
+  <button id="go">Run ping</button>
+  <div id="log"></div>
+<script>
+const logEl = document.getElementById('log');
+function line(txt, cls) {
+  const d = document.createElement('div');
+  d.className = 'row ' + (cls || '');
+  d.textContent = txt;
+  logEl.appendChild(d);
+}
+document.getElementById('go').addEventListener('click', () => {
+  logEl.innerHTML = '';
+  line('connecting to wss://' + location.host + '/ws ...');
+  const tStart = performance.now();
+  const ws = new WebSocket('wss://' + location.host + '/ws');
+  let pingSentAt = 0;
+  ws.addEventListener('open', () => {
+    line('open (' + Math.round(performance.now() - tStart) + 'ms)', 'ok');
+    pingSentAt = performance.now();
+    ws.send(JSON.stringify({type: 'ping'}));
+  });
+  ws.addEventListener('message', (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { line('bad json: ' + ev.data, 'bad'); return; }
+    if (m.type === 'hello') {
+      line('hello id=' + m.id + ' t=' + m.t);
+    } else if (m.type === 'pong') {
+      const rtt = Math.round(performance.now() - pingSentAt);
+      line('pong rtt=' + rtt + 'ms', 'ok');
+      ws.close();
+    } else {
+      line('other: ' + JSON.stringify(m));
+    }
+  });
+  ws.addEventListener('close', (ev) => {
+    line('close code=' + ev.code);
+  });
+  ws.addEventListener('error', () => {
+    line('error — check network / cloudflare WebSockets toggle', 'bad');
+  });
+});
+</script>
+</body>
+</html>
