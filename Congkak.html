@@ -1474,11 +1474,28 @@ function App() {
       if (msg.type === 'room_joined') {
         setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
         setNetMode('online');
+        // Snap to authoritative server state
+        if (msg.gameState) {
+          const g = msg.gameState;
+          setBoard({ holes: g.holes.slice(), rumah: g.rumah.slice() });
+          boardRef.current = { holes: g.holes.slice(), rumah: g.rumah.slice() };
+          setPhase(g.phase);
+          phaseRef.current = g.phase;
+          openerDoneRef.current = { 0: g.openerDone[0], 1: g.openerDone[1] };
+          setCurrentPlayer(g.turn);
+          setWinner(g.winner);
+          setShowRules(false);
+        }
       } else if (msg.type === 'room_update') {
         setNetRoom(prev => prev ? { ...prev, peers: msg.peers } : prev);
       } else if (msg.type === 'room_error') {
         setNetError(msg.reason || 'room error');
         setNetStatus('error');
+      } else if (msg.type === 'move_applied') {
+        // Concurrent animator call (shared boardRef, hands[p] updated by mover).
+        animateOnlineEvents(msg.events, msg.move.player, msg.state);
+      } else if (msg.type === 'move_rejected') {
+        setLastAction('move rejected: ' + msg.reason);
       }
     });
     return ws;
@@ -1557,12 +1574,14 @@ function App() {
 
   // In simultaneous-opener phase, both sides are playable independently (as long as that player isn't already sowing)
   const inOpener = phase === 'opener-sim';
+  // Online mode: you can only click holes on YOUR seat's side.
+  const onlineSeatLock = (p) => netMode === 'online' && netRoom && netRoom.seat !== p;
   const canBottomPlay = inOpener
-    ? (!hands[0] && !winner && !openerDoneRef.current[0])
-    : (currentPlayer === 0 && !isAnimating && !winner);
+    ? (!hands[0] && !winner && !openerDoneRef.current[0] && !onlineSeatLock(0))
+    : (currentPlayer === 0 && !isAnimating && !winner && !onlineSeatLock(0));
   const canTopPlay = inOpener
-    ? (!hands[1] && !winner && !openerDoneRef.current[1])
-    : (currentPlayer === 1 && !isAnimating && !winner);
+    ? (!hands[1] && !winner && !openerDoneRef.current[1] && !onlineSeatLock(1))
+    : (currentPlayer === 1 && !isAnimating && !winner && !onlineSeatLock(1));
 
   const p0Active = inOpener ? !winner : (currentPlayer === 0 && !winner);
   const p1Active = inOpener ? !winner : (currentPlayer === 1 && !winner);
@@ -1988,11 +2007,147 @@ function App() {
 
   // ===== Move handler (safe against rapid clicks) =====
   function playMoveSafe(startHole) {
+    // Online mode: send to server, don't run local reducer. Server broadcasts
+    // move_applied which the WS handler plays via animator.
+    if (netMode === 'online' && netRoom) {
+      const p = isOwnSide(startHole, 0) ? 0 : 1;
+      if (p !== netRoom.seat) return; // can only move for your own seat
+      netSend({ type: 'play_move', move: { player: p, hole: startHole } });
+      return;
+    }
     if (phaseRef.current === 'opener-sim') {
       const p = isOwnSide(startHole, 0) ? 0 : 1;
       playMoveParallel(p, startHole);
     } else {
       playMoveV2(startHole);
+    }
+  }
+
+  // ===== Online mode: animator for events broadcast by the server =====
+  // Each incoming move_applied message produces one call; multiple can run
+  // concurrently (fast player's move starts animating while opponent's is
+  // still in flight). Each run mutates boardRef directly.
+  async function animateOnlineEvents(events, moverPlayer, finalState) {
+    const PICKUP_MS = 260;
+    const MOVE_MS = 220;
+    const SETTLE_MS = 40;
+    const DROP_AFTER_MS = 90;
+    const CHAIN_WAIT_MS = 220;
+
+    const b = boardRef.current;
+    const setMyHand = (updater) => {
+      setHands(prev => {
+        const cur = prev[moverPlayer];
+        const next = typeof updater === 'function' ? updater(cur) : updater;
+        return { ...prev, [moverPlayer]: next };
+      });
+    };
+
+    const myToken = abortRef.current;
+    const aborted = () => abortRef.current !== myToken;
+
+    let prevWasDrop = false;
+    for (const ev of events) {
+      if (aborted()) return;
+      if (ev.player != null && ev.player !== moverPlayer) continue; // skip other player's events (shouldn't exist in MP; defensive)
+
+      if (ev.kind === 'pickup') {
+        if (prevWasDrop) { await sleep(CHAIN_WAIT_MS); if (aborted()) return; }
+        b.holes[ev.hole] = 0;
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        const pos = positionFor({ type: 'hole', idx: ev.hole });
+        if (pos) setMyHand({ x: pos.x, y: pos.y - 40, carrying: ev.count, player: moverPlayer });
+        await sleep(PICKUP_MS);
+        prevWasDrop = false;
+      } else if (ev.kind === 'drop') {
+        const pos = positionFor(ev.at);
+        if (pos) setMyHand(h => h ? { ...h, x: pos.x, y: pos.y - 40 } : h);
+        await sleep(MOVE_MS + SETTLE_MS);
+        if (aborted()) return;
+        if (ev.at.type === 'hole') b.holes[ev.at.idx] += 1;
+        else b.rumah[ev.at.p] += 1;
+        setMyHand(h => h ? { ...h, carrying: h.carrying != null ? h.carrying - 1 : h.carrying } : h);
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        sfxDrop();
+        await sleep(DROP_AFTER_MS);
+        prevWasDrop = true;
+      } else if (ev.kind === 'anotherTurn') {
+        sfxRumah();
+        announceText((moverPlayer === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
+        setLastAction((moverPlayer === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'tikam') {
+        setMyHand(null);
+        setCaptureFlashes(prev => new Set([...prev, ev.landedHole, ev.oppHole]));
+        setBoardShake(true);
+        sfxCapture();
+        announceText((moverPlayer === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
+        await sleep(650);
+        if (aborted()) return;
+        const oppPos = positionFor({ type: 'hole', idx: ev.oppHole });
+        const landPos = positionFor({ type: 'hole', idx: ev.landedHole });
+        const rumahPos = positionFor({ type: 'rumah', p: moverPlayer });
+        if (oppPos && landPos && rumahPos) {
+          const fliers = [];
+          const baseId = Date.now() + '-' + moverPlayer;
+          const jitter = () => (Math.random() - 0.5) * 24;
+          for (let k = 0; k < ev.oppCount; k++) fliers.push({ id: baseId+'-o-'+k, fromX: oppPos.x+jitter(), fromY: oppPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: k*55 });
+          for (let k = 0; k < ev.landCount; k++) fliers.push({ id: baseId+'-l-'+k, fromX: landPos.x+jitter(), fromY: landPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: 200+k*55 });
+          setFlyingSeeds(prev => [...prev, ...fliers]);
+          b.holes[ev.oppHole] = 0;
+          b.holes[ev.landedHole] = 0;
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          const totalDuration = 200 + Math.max(ev.oppCount, ev.landCount) * 55 + 900;
+          await sleep(totalDuration - 200);
+          if (aborted()) return;
+          b.rumah[moverPlayer] += ev.loot;
+          setRumahFlash(prev => new Set([...prev, moverPlayer]));
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          await sleep(250);
+          setFlyingSeeds([]);
+        } else {
+          b.holes[ev.oppHole] = 0; b.holes[ev.landedHole] = 0; b.rumah[moverPlayer] += ev.loot;
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        }
+        setLastAction((moverPlayer === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + ev.loot + ' seeds.');
+        await sleep(450);
+        setCaptureFlashes(new Set());
+        setBoardShake(false);
+        setRumahFlash(new Set());
+        prevWasDrop = false;
+      } else if (ev.kind === 'noCapture') {
+        const who = moverPlayer === 0 ? 'Player One' : 'Player Two';
+        setLastAction(ev.reason === 'notPassedRumah'
+          ? who + ' landed empty — but hadn’t passed their rumah yet. No tikam.'
+          : who + ' landed empty — nothing across.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'mati') {
+        setLastAction((moverPlayer === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'phaseChange') {
+        setPhase(ev.to);
+        phaseRef.current = ev.to;
+      } else if (ev.kind === 'turnEnd') {
+        // Commit turn at the tail of the event stream below
+      } else if (ev.kind === 'roundEnd') {
+        // Commit winner at the tail below
+      }
+    }
+
+    // Commit final authoritative state from server.
+    setBoard({ holes: finalState.holes.slice(), rumah: finalState.rumah.slice() });
+    boardRef.current = { holes: finalState.holes.slice(), rumah: finalState.rumah.slice() };
+    openerDoneRef.current = { 0: finalState.openerDone[0], 1: finalState.openerDone[1] };
+    if (finalState.phase !== phaseRef.current) {
+      setPhase(finalState.phase);
+      phaseRef.current = finalState.phase;
+    }
+    setCurrentPlayer(finalState.turn);
+    setActiveHole(null);
+    setTimeout(() => setHands(prev => ({ ...prev, [moverPlayer]: null })), 280);
+    if (finalState.winner) {
+      setWinner(finalState.winner);
+      if (finalState.winner.player >= 0) { sfxWin(); burstConfetti(); }
     }
   }
 

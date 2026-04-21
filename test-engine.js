@@ -373,5 +373,72 @@ run('rejects missing pick from active player', () => {
   assertEq(out.events, [{ kind: 'invalid', reason: 'missingPick' }]);
 });
 
+// ---- Opener-solo tests (multiplayer per-player action) ----
+
+console.log('\nReducer — opener_solo (MP atomic move):');
+
+run('solo: P0 plays hole 6 with 1 seed → rumah, openerDone stays false', () => {
+  const s = mkOpenerState({ holes: [0,0,0,0,0,0,1, 0,0,0,0,0,0,0] });
+  const out = E.reducer(s, { type: 'opener_solo', player: 0, hole: 6 });
+  assertEq(count(out.events, 'anotherTurn'), 1);
+  assertEq(out.state.openerDone, [false, false]);
+  assertEq(out.state.phase, 'opener-sim');
+});
+
+run('solo: P0 non-rumah end sets openerDone[0]=true', () => {
+  const s = mkOpenerState({ holes: [2,0,0,0,0,0,0, 0,0,0,0,0,0,0] });
+  // hole 0 with 2 seeds → 1, 2. Last=2 (empty), own side, not passed rumah.
+  const out = E.reducer(s, { type: 'opener_solo', player: 0, hole: 0 });
+  assertEq(count(out.events, 'noCapture'), 1);
+  assertEq(out.state.openerDone, [true, false]);
+});
+
+run('solo: after both openerDone, phase transitions to alternating', () => {
+  // P0 already done. P1 plays non-rumah end. Give P0 some holes with seeds
+  // so P0 can take the first alternating turn.
+  const s = mkOpenerState({
+    holes: [3,0,0,0,0,0,0, 2,0,0,0,0,0,0],
+    openerDone: [true, false],
+  });
+  const out = E.reducer(s, { type: 'opener_solo', player: 1, hole: 7 });
+  assertEq(out.state.openerDone, [true, true]);
+  assertEq(out.state.phase, 'alternating');
+  assertTrue(out.events.some(e => e.kind === 'phaseChange'));
+  assertEq(out.state.turn, 0, 'opponent (P0) of last-mover goes first (P0 has moves)');
+});
+
+run('solo: transition picks mover if opponent has no moves', () => {
+  const s = mkOpenerState({
+    holes: [0,0,0,0,0,0,0, 2,0,0,0,0,0,0],
+    openerDone: [true, false],
+  });
+  const out = E.reducer(s, { type: 'opener_solo', player: 1, hole: 7 });
+  assertEq(out.state.phase, 'alternating');
+  assertEq(out.state.turn, 1, 'P0 has no moves → turn stays with P1');
+});
+
+run('solo rejects move from done player', () => {
+  const s = mkOpenerState({ openerDone: [true, false] });
+  const out = E.reducer(s, { type: 'opener_solo', player: 0, hole: 0 });
+  assertEq(out.events, [{ kind: 'invalid', reason: 'alreadyDone' }]);
+});
+
+run('solo rejects move on opponent side', () => {
+  const s = mkOpenerState({});
+  const out = E.reducer(s, { type: 'opener_solo', player: 0, hole: 7 });
+  assertEq(out.events, [{ kind: 'invalid', reason: 'notOwnSide' }]);
+});
+
+run('solo seed conservation across multiple solo calls', () => {
+  let s = E.initialState(7, 'simultaneous');
+  // P1 plays hole 13, then P0 plays hole 0 (interleaved as atomic moves)
+  s = E.reducer(s, { type: 'opener_solo', player: 1, hole: 13 }).state;
+  const total1 = s.holes.reduce((a,b)=>a+b,0) + s.rumah[0] + s.rumah[1];
+  assertEq(total1, 98);
+  s = E.reducer(s, { type: 'opener_solo', player: 0, hole: 0 }).state;
+  const total2 = s.holes.reduce((a,b)=>a+b,0) + s.rumah[0] + s.rumah[1];
+  assertEq(total2, 98);
+});
+
 console.log('\nTotal: ' + passed + ' passed, ' + failed + ' failed');
 if (failed > 0) process.exit(1);

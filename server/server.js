@@ -20,6 +20,7 @@
 
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
+const engine = require('./engine.js');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const HOST = process.env.HOST || '127.0.0.1';
@@ -83,6 +84,12 @@ function seatOfWs(room, ws) {
   return -1;
 }
 
+// Game state initializer. MVP: always 7 seeds per hole, start simultaneous.
+// Phase 5+ will read these from a lobby config / room option.
+function freshGameState() {
+  return engine.initialState(7, 'simultaneous');
+}
+
 function handleCreateRoom(ws, state) {
   if (state.roomCode) return send(ws, { type: 'room_error', reason: 'already-in-room' });
   const code = newCode();
@@ -91,6 +98,8 @@ function handleCreateRoom(ws, state) {
   const room = {
     code,
     players: [player, null],
+    gameState: freshGameState(),
+    seq: 0,
     createdAt: Date.now(),
     lastActivity: Date.now(),
   };
@@ -98,7 +107,7 @@ function handleCreateRoom(ws, state) {
   state.roomCode = code;
   state.seat = 0;
   state.clientId = clientId;
-  send(ws, { type: 'room_joined', code, seat: 0, clientId, peers: peerSummary(room) });
+  send(ws, { type: 'room_joined', code, seat: 0, clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
   log(`room ${code} created by seat 0`);
 }
 
@@ -115,7 +124,7 @@ function handleJoinRoom(ws, state, msg) {
   state.roomCode = code;
   state.seat = seat;
   state.clientId = clientId;
-  send(ws, { type: 'room_joined', code, seat, clientId, peers: peerSummary(room) });
+  send(ws, { type: 'room_joined', code, seat, clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
   sendRoomUpdate(room);
   log(`room ${code} joined by seat ${seat}`);
 }
@@ -139,9 +148,38 @@ function handleRejoinRoom(ws, state, msg) {
   state.roomCode = code;
   state.seat = seat;
   state.clientId = msg.clientId;
-  send(ws, { type: 'room_joined', code, seat, clientId: msg.clientId, peers: peerSummary(room) });
+  send(ws, { type: 'room_joined', code, seat, clientId: msg.clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
   sendRoomUpdate(room);
   log(`room ${code} rejoined by seat ${seat}`);
+}
+
+function handlePlayMove(ws, state, msg) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return send(ws, { type: 'move_rejected', reason: 'not-in-room' });
+  if (state.seat !== msg.move?.player) return send(ws, { type: 'move_rejected', reason: 'seat-mismatch' });
+  // Dispatch based on current phase
+  let action;
+  if (room.gameState.phase === 'opener-sim') {
+    action = { type: 'opener_solo', player: msg.move.player, hole: msg.move.hole };
+  } else {
+    action = { type: 'play_move', player: msg.move.player, hole: msg.move.hole };
+  }
+  const result = engine.reducer(room.gameState, action);
+  if (result.events.length === 1 && result.events[0].kind === 'invalid') {
+    return send(ws, { type: 'move_rejected', reason: result.events[0].reason, seq: room.seq });
+  }
+  room.gameState = result.state;
+  room.seq += 1;
+  room.lastActivity = Date.now();
+  const payload = {
+    type: 'move_applied',
+    seq: room.seq,
+    move: msg.move,
+    events: result.events,
+    state: result.state,
+  };
+  broadcastRoom(room, payload);
+  log(`room ${room.code} move: seat=${msg.move.player} hole=${msg.move.hole} seq=${room.seq}`);
 }
 
 function handleLeaveRoom(ws, state) {
@@ -224,6 +262,7 @@ wss.on('connection', (ws, req) => {
       case 'join_room':    return handleJoinRoom(ws, state, msg);
       case 'rejoin_room':  return handleRejoinRoom(ws, state, msg);
       case 'leave_room':   return handleLeaveRoom(ws, state);
+      case 'play_move':    return handlePlayMove(ws, state, msg);
       default:             return send(ws, { type: 'echo', payload: msg });
     }
   });

@@ -136,7 +136,134 @@
     if (action.type === 'opener_round' && state.phase === 'opener-sim') {
       return openerRound(state, action.picks);
     }
+    if (action.type === 'opener_solo' && state.phase === 'opener-sim') {
+      return openerSolo(state, action.player, action.hole);
+    }
     return { state: state, events: [{ kind: 'invalid', reason: 'unknownAction' }] };
+  }
+
+  // ---------- Opener-solo (multiplayer, per-player atomic move) ----------
+  //
+  // { type: 'opener_solo', player, hole } — one player's opener move, atomically.
+  // Mirrors playMoveAlternating's sowing/chain/tikam rules, but:
+  //   - No state.turn check (simultaneous phase has no turn ordering)
+  //   - Updates state.openerDone[player] based on whether it ended in rumah
+  //     continuation. Non-rumah ends set openerDone[player] = true.
+  //   - When both openerDone flags are true, transitions phase to 'alternating'
+  //     and picks the next player (opposite of the last to finish if possible).
+  //
+  // Unlike opener_round, there's no collision detection vs. the other player —
+  // moves are serialized on the server, each atomic, so "simultaneous" is a
+  // visual effect on the client (animations overlap in wall-clock time).
+
+  function openerSolo(state, player, hole) {
+    if (state.winner) return { state: state, events: [{ kind: 'invalid', reason: 'gameOver' }] };
+    if (state.openerDone[player]) return { state: state, events: [{ kind: 'invalid', reason: 'alreadyDone' }] };
+    if (!isOwnSide(hole, player)) return { state: state, events: [{ kind: 'invalid', reason: 'notOwnSide' }] };
+    if (state.holes[hole] === 0) return { state: state, events: [{ kind: 'invalid', reason: 'emptyHole' }] };
+
+    var b = cloneBoard(state);
+    var events = [];
+    var currentHole = hole;
+    var resolvedInOwnRumah = false;
+    var passedOwnRumah = false;
+
+    for (var chain = 0; chain < 40; chain++) {
+      var count = b.holes[currentHole];
+      b.holes[currentHole] = 0;
+      events.push({ kind: 'pickup', player: player, hole: currentHole, count: count });
+
+      var path = sowPath(currentHole, player);
+      var lastStop = null;
+      for (var i = 0; i < count; i++) {
+        var stop = path[i];
+        if (stop.type === 'hole') {
+          b.holes[stop.idx] += 1;
+        } else {
+          b.rumah[stop.p] += 1;
+          if (stop.p === player) passedOwnRumah = true;
+        }
+        events.push({ kind: 'drop', player: player, at: stop });
+        lastStop = stop;
+      }
+
+      if (lastStop.type === 'rumah' && lastStop.p === player) {
+        events.push({ kind: 'anotherTurn', player: player });
+        resolvedInOwnRumah = true;
+        break;
+      }
+      if (lastStop.type === 'hole') {
+        var lastIdx = lastStop.idx;
+        if (b.holes[lastIdx] > 1) {
+          currentHole = lastIdx;
+          continue;
+        }
+        if (isOwnSide(lastIdx, player)) {
+          var oppIdx = opposite(lastIdx);
+          if (b.holes[oppIdx] > 0 && passedOwnRumah) {
+            var loot = b.holes[oppIdx] + b.holes[lastIdx];
+            events.push({
+              kind: 'tikam',
+              player: player,
+              landedHole: lastIdx,
+              oppHole: oppIdx,
+              oppCount: b.holes[oppIdx],
+              landCount: b.holes[lastIdx],
+              loot: loot,
+            });
+            b.holes[oppIdx] = 0;
+            b.holes[lastIdx] = 0;
+            b.rumah[player] += loot;
+          } else if (b.holes[oppIdx] > 0 && !passedOwnRumah) {
+            events.push({ kind: 'noCapture', player: player, reason: 'notPassedRumah' });
+          } else {
+            events.push({ kind: 'noCapture', player: player, reason: 'opponentEmpty' });
+          }
+        } else {
+          events.push({ kind: 'mati', player: player });
+        }
+        break;
+      }
+    }
+
+    // Update openerDone flag for this player
+    var newOpenerDone = state.openerDone.slice();
+    if (!resolvedInOwnRumah) newOpenerDone[player] = true;
+
+    // End-of-round check
+    var p0Has = playerHasMoves(b, 0);
+    var p1Has = playerHasMoves(b, 1);
+    var winner = null;
+    var newPhase = state.phase;
+    var newTurn = state.turn;
+
+    if (!p0Has && !p1Has) {
+      var w = b.rumah[0] === b.rumah[1] ? -1 : (b.rumah[0] > b.rumah[1] ? 0 : 1);
+      winner = { player: w, scores: b.rumah.slice() };
+      events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
+    } else if (newOpenerDone[0] && newOpenerDone[1]) {
+      // Both done with opener → switch to alternating.
+      // The LAST to finish is `player` (this move); opponent goes first.
+      newPhase = 'alternating';
+      var other = 1 - player;
+      newTurn = playerHasMoves(b, other) ? other : player;
+      events.push({ kind: 'phaseChange', from: 'opener-sim', to: 'alternating' });
+      events.push({ kind: 'turnEnd', nextPlayer: newTurn });
+    }
+
+    return {
+      state: {
+        holes: b.holes,
+        rumah: b.rumah,
+        turn: newTurn,
+        phase: newPhase,
+        openerDone: newOpenerDone,
+        seedsPerHole: state.seedsPerHole,
+        winner: winner,
+        seq: state.seq + 1,
+      },
+      events: events,
+    };
   }
 
   // ---------- Opener-sim (commit-and-reveal) ----------
