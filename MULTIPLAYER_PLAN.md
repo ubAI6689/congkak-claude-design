@@ -3,6 +3,18 @@
 Online multiplayer for a single-file React CDN app. Long-running, phased.
 Target: casual 2-player, no anti-cheat, user owns the OVH VPS serving the static site.
 
+## Status — decisions locked (2026-04-21)
+
+- **Branch**: `multiplayer` (pushed to origin). All dev lives here until merge-to-main.
+- **Build**: accept the split. New `engine.js` ES module, shared by browser + Node server.
+- **Architecture**: self-hosted WebSocket relay on OVH VPS, server-authoritative.
+- **Transport path**: `wss://congkak.ubaidrac.xyz/ws` (behind Cloudflare, nginx reverse proxy to local Node process).
+- **Beta env**: `https://congkak.ubaidrac.xyz/beta/` (path-based, not subdomain). Protected by HTTP Basic Auth.
+- **Sim opener in MVP**: **Commit-and-reveal** model. Both players submit opener picks privately; once both received, server runs the full reducer to produce a deterministic timeline (including any collisions/bumps), broadcasts it, both clients animate in sync. No live-race interaction during sowing. Frame it as a 3-second "reveal" countdown for drama.
+- **Accounts + leaderboard**: phased after MVP. Phase 5 adds optional accounts (anon still works). Phase 6 adds leaderboard with persistent DB. MVP is fully anonymous room-code play.
+- **Reconnect window**: 60s.
+- **Rollback netcode / live-race**: explicitly rejected. Cost-vs-benefit not worth it.
+
 ## TL;DR
 
 - **Recommendation:** self-hosted WebSocket relay on the existing OVH VPS, server-authoritative for game state, client-owns-animation. Reject P2P/WebRTC for Phase 1 (NAT traversal + no STUN/TURN budget = flaky; offers nothing this game needs).
@@ -147,9 +159,20 @@ Each phase ships on its own. Don't start phase N+1 until N is live in prod.
 
 **Acceptance:** two peers share a room, see each other's seat assignment, survive one peer closing their tab (server marks seat empty, broadcasts).
 
-### Phase 4 — Alternating-mode online play (MVP shippable)
+### Phase 4 — Online play MVP (alternating + commit-and-reveal opener)
 
-**Goal:** a full alternating game playable online between two browsers.
+**Goal:** a full game playable online between two browsers — including the simultaneous opener via the commit-and-reveal UX.
+
+**Commit-and-reveal opener protocol:**
+
+- Both clients send `{type:'opener_pick', hole}` privately.
+- Server waits for both picks (with a 30s timeout — if only one arrives, fallback to "that player goes first alternating").
+- Once both arrive, server runs the reducer with BOTH picks in a single step to produce one deterministic event timeline covering both hands' sowings, including all collisions resolved as `bump` events.
+- Server broadcasts `{type:'opener_reveal', events, state, seq}` to both clients with a 3-second start delay.
+- Both clients show a "3 · 2 · 1" countdown, then animate the pre-computed timeline together.
+- After opener ends, normal alternating flow begins.
+
+**Collision-resolution rule** (applied server-side in reducer): if both hands would drop into the same hole on the same tick, the lower-seat player wins the drop; the other hand bumps. Tiebreak is deterministic and documented so neither client disagrees.
 
 **Protocol (keep tiny):**
 
@@ -204,21 +227,34 @@ Pick off in any order:
 - **"Waiting for opponent" affordances.** Timer, copy-link reminder, maybe an emote-only reaction so players know the other peer is alive.
 - **Connection-state banner.** Reconnecting / laggy / dropped.
 
-### Phase 6 — Simultaneous opener online (research-flagged; consider dropping)
+### Phase 5 — Polish & quality-of-life (shippable incrementally)
 
-**The beast.** Two players sowing concurrently, with the existing code's collision detection (`waitForPath`, `handAtRef`, `busyRef`) relying on both hands reading the same `boardRef` in the same JS event loop. Over a network, each peer's "current hand position" arrives late to the other. The possible designs, in order of increasing honesty:
+Covered above (rematch, spectators, connection banner, etc.).
 
-- **(a) Drop the mode for online.** When `mode === 'online'`, force `startStyle = 'alternating'`. Ship in Phase 4, revisit never. Recommended default — lets you ship MVP without solving this.
-- **(b) Server-orchestrated "lockstep opener."** Both clients send `{pickHole}` at opener start. Server assigns a deterministic event timeline for both sowings, resolving collisions in the reducer. Each client animates its own hand locally from the timeline. Collisions manifest as bumps pre-computed by the server. Loses the "I'm actually racing" feel — it's a cutscene, not a race.
-- **(c) Client-predictive opener.** Each client plays its own sowing optimistically, streams `{myHandAt: stop}` at every drop, server merges. On collision, server emits `bump` authoritatively and the later client rewinds one step. Plays better, but requires rollback. Realistically 1–2 weeks of work and will surface edge cases for months. Don't.
+### Phase 6 — Accounts
 
-**Recommendation:** ship (a). If the community actually misses simultaneous-opener online, reopen with (b). Don't attempt (c).
+**Goal:** optional login. Anon play still works.
 
-### Phase 7 — Async / "send a link, play later" (optional, far future)
+- DB: SQLite on the VPS. `users(id, username, email?, password_hash, created_at)`.
+- Auth: email + password, or magic-link (pick one). Session cookie signed by the Node server.
+- Lobby UI: "Sign in" button in topbar. When signed in, your username shows on the player panel. When not, you play as "Guest".
+- Room ownership: rooms created by logged-in users persist (can be resumed after reconnect even across sessions); guest-created rooms GC after 5 min idle.
+- **Decision required before starting**: email+password vs magic-link. Magic-link simpler (no password reset flow) but requires outbound email (SendGrid/Postmark/self-hosted SMTP). Email+password means handling bcrypt, reset tokens, etc.
 
-- Persist rooms to SQLite on the VPS.
+### Phase 7 — Leaderboard
+
+**Goal:** persistent per-user stats + rankings.
+
+- DB: add `games(id, player_a_id, player_b_id, winner_id, started_at, ended_at, final_scores)` and `user_stats(user_id, wins, losses, draws, rating)`.
+- Rating: simple ELO or Glicko-2. MVP starts everyone at 1200, K-factor 32.
+- Leaderboard page `/leaderboard` (public, path-based) with top 100 by rating, plus "your rank" if logged in.
+- Games only counted if BOTH players were logged in (prevents alt-account farming).
+
+### Phase 8 — Async / "send a link, play later" (optional, far future)
+
+- Persist rooms to the same SQLite DB as accounts.
 - Allow rooms with no currently-connected players; notify via email/webhook when the other player moves.
-- Only worth doing if someone asks. Skip by default.
+- Only worth doing if users actually ask. Skip by default.
 
 ---
 
