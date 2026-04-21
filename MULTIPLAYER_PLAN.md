@@ -3,17 +3,27 @@
 Online multiplayer for a single-file React CDN app. Long-running, phased.
 Target: casual 2-player, no anti-cheat, user owns the OVH VPS serving the static site.
 
-## Status — decisions locked (2026-04-21)
+## Status — decisions locked (2026-04-21, revised)
 
 - **Branch**: `multiplayer` (pushed to origin). All dev lives here until merge-to-main.
 - **Build**: accept the split. New `engine.js` ES module, shared by browser + Node server.
 - **Architecture**: self-hosted WebSocket relay on OVH VPS, server-authoritative.
 - **Transport path**: `wss://congkak.ubaidrac.xyz/ws` (behind Cloudflare, nginx reverse proxy to local Node process).
 - **Beta env**: `https://congkak.ubaidrac.xyz/beta/` (path-based, not subdomain). Protected by HTTP Basic Auth.
-- **Sim opener in MVP**: **Commit-and-reveal** model. Both players submit opener picks privately; once both received, server runs the full reducer to produce a deterministic timeline (including any collisions/bumps), broadcasts it, both clients animate in sync. No live-race interaction during sowing. Frame it as a 3-second "reveal" countdown for drama.
-- **Accounts + leaderboard**: phased after MVP. Phase 5 adds optional accounts (anon still works). Phase 6 adds leaderboard with persistent DB. MVP is fully anonymous room-code play.
+- **Sim opener in MVP**: **Classic-feel independent moves, NOT commit-and-reveal.** Each player's click fires their own atomic move through the server. Fast player acts immediately without waiting for the other. Dropped the commit-and-reveal pattern — the insight: once you accept "no waiting," there's nothing a commit step adds beyond classic click-to-sow. And since both players physically share a screen anyway in our pass-and-play scenarios, anti-peek isn't a real concern.
+- **Collision / bump mechanic dropped for MP.** Rule simplification: if both players happen to drop in the same hole on the same wall-clock instant, both drops land, no bump. Rationale: the bump was a local-play artifact (needed because both coroutines shared event-loop memory). Over a network, preserving it requires rollback netcode (weeks of work). Eliminating it gives clean, simple per-player atomic moves.
+- **Tikam on contested holes**: resolved by server arrival order (first move processed wins). If P0 is about to tikam hole 4 and P1 just dropped a seed into the opposite hole, P0's tikam captures P1's seed. Matches physical play: whoever reaches the contested hole first.
+- **Accounts + leaderboard**: phased after MVP. Phase 6 adds optional accounts (anon still works). Phase 7 adds leaderboard with persistent DB. MVP is fully anonymous room-code play.
 - **Reconnect window**: 60s.
-- **Rollback netcode / live-race**: explicitly rejected. Cost-vs-benefit not worth it.
+- **Rollback netcode / live-race**: explicitly rejected.
+
+### Why we reverted reveal-mode on 2026-04-21
+
+- Built the commit-and-reveal UI for local play (Phase 1.4b+c).
+- User request: "fast player should be able to MOVE immediately, not just pick."
+- Realization: "pick first, animate later" is only useful if (a) the game hides your pick from opponent, or (b) both reveals must be synchronized for drama. For local play, neither holds. For MP with the "classic feel" requirement, both hold but collide with the requirement.
+- Decision: drop reveal mode. MP uses per-player atomic moves, no bumps. Simpler protocol, matches user's mental model of "click and go."
+- Kept in engine.js: `opener_round` reducer + 7 unit tests (unused but complete; may be reused if we ever want a synchronized MP mode).
 
 ## TL;DR
 
@@ -159,20 +169,57 @@ Each phase ships on its own. Don't start phase N+1 until N is live in prod.
 
 **Acceptance:** two peers share a room, see each other's seat assignment, survive one peer closing their tab (server marks seat empty, broadcasts).
 
-### Phase 4 — Online play MVP (alternating + commit-and-reveal opener)
+### Phase 4 — Online play MVP (classic-feel independent moves)
 
-**Goal:** a full game playable online between two browsers — including the simultaneous opener via the commit-and-reveal UX.
+**Goal:** a full game playable online between two browsers. Feels like local classic mode.
 
-**Commit-and-reveal opener protocol:**
+**Protocol (unified for opener-sim and alternating):**
 
-- Both clients send `{type:'opener_pick', hole}` privately.
-- Server waits for both picks (with a 30s timeout — if only one arrives, fallback to "that player goes first alternating").
-- Once both arrive, server runs the reducer with BOTH picks in a single step to produce one deterministic event timeline covering both hands' sowings, including all collisions resolved as `bump` events.
-- Server broadcasts `{type:'opener_reveal', events, state, seq}` to both clients with a 3-second start delay.
-- Both clients show a "3 · 2 · 1" countdown, then animate the pre-computed timeline together.
-- After opener ends, normal alternating flow begins.
+- C→S: `{type:'play_move', roomId, seq, move:{player, hole}}`
+- S→C (both clients): `{type:'move_applied', seq, move, events, state, stateHash}`
+- S→C (on join/reconnect): `{type:'state_snapshot', state, seq}`
+- Heartbeat every 20s; disconnect after 45s silence.
 
-**Collision-resolution rule** (applied server-side in reducer): if both hands would drop into the same hole on the same tick, the lower-seat player wins the drop; the other hand bumps. Tiebreak is deterministic and documented so neither client disagrees.
+**Server logic per move:**
+
+```
+on play_move:
+  if move.player !== seatOf(sender): reject (seat mismatch)
+  if state.phase === 'opener-sim':
+    // free-phase: any non-done player can act on own side with seeds
+    if state.openerDone[move.player]: reject
+    if !isOwnSide(move.hole, move.player): reject
+    if state.holes[move.hole] === 0: reject
+    {state', events} = openerSoloReducer(state, move.player, move.hole)
+  else:
+    if state.turn !== move.player: reject
+    {state', events} = reducer(state, {type:'play_move', ...move})
+  room.state = state'; room.seq++
+  broadcast move_applied
+```
+
+The server processes moves FCFS. Moves arriving "simultaneously" are serialized by arrival order. No live collision detection; no bumps. Each move is atomic with its full chain computed inside the reducer call.
+
+**Engine additions needed:**
+
+- New reducer action `opener_solo` that simulates ONE player's opener move (vs. `opener_round` which expects both). Mirrors alternating `play_move` internals but skips the `turn` check and updates `openerDone` for the acting player. Does NOT include collision detection against the other player (they're atomic, server-serialized).
+- Transition to alternating happens when both `openerDone[0]` and `openerDone[1]` are true (same rule as before).
+
+**Client changes:**
+
+- Visual: opponent's animation plays when `move_applied` arrives. Can overlap with local animations — the concurrent-animator machinery from the (removed) reveal mode is the right shape for this. Keep it in mind to reintroduce.
+- Seat awareness: only your side's holes are clickable. Opponent's cursor may or may not be shown (design choice; low-cost either way).
+
+**Reconnect** (basic): client stores `{roomId, seat, clientId}` in sessionStorage. On reload, attempt `rejoin_room`. Server holds seat for 60s. On reconnect, `state_snapshot` restores.
+
+**Scope:** ~400 LOC client, ~250 LOC server. 2–3 days.
+
+**Acceptance:**
+
+- Two browsers on different networks play a complete game through opener-sim and alternating phases.
+- Fast player can commit their next move the instant they click; server processes it immediately and broadcasts; opponent sees the animation.
+- Closing one tab for <60s and reopening resumes mid-game.
+- Illegal moves (forged packets, wrong-seat, out-of-turn in alternating phase) are rejected without desync.
 
 **Protocol (keep tiny):**
 

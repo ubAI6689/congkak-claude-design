@@ -566,74 +566,6 @@
   .hand.ghost.flipped {
     animation: ghostHoverFlipped 1.6s ease-in-out infinite;
   }
-  /* Committed ghost (reveal mode): golden pulsing ring + check badge */
-  .hand.ghost.committed {
-    opacity: 1;
-    filter: drop-shadow(0 0 12px oklch(0.78 0.12 85 / 0.7)) drop-shadow(0 4px 6px oklch(0.15 0.04 40 / 0.35));
-    animation: committedPulse 1.2s ease-in-out infinite;
-  }
-  .hand.ghost.committed.flipped {
-    animation: committedPulseFlipped 1.2s ease-in-out infinite;
-  }
-  @keyframes committedPulse {
-    0%, 100% { transform: translate(-50%, -14%) scale(1); }
-    50%      { transform: translate(-50%, -14%) scale(1.08); }
-  }
-  @keyframes committedPulseFlipped {
-    0%, 100% { transform: translate(-50%, -14%) rotate(180deg) scale(1); }
-    50%      { transform: translate(-50%, -14%) rotate(180deg) scale(1.08); }
-  }
-  .hand.ghost.committed::after {
-    content: "✓";
-    position: absolute;
-    top: -8px; right: -8px;
-    width: 22px; height: 22px;
-    border-radius: 50%;
-    background: var(--gold);
-    color: var(--ink);
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 13px;
-    font-weight: 700;
-    display: grid; place-items: center;
-    box-shadow: 0 2px 6px oklch(0.15 0.04 40 / 0.4);
-  }
-  .hand.ghost.committed.flipped::after {
-    transform: rotate(180deg);
-  }
-
-  /* Bump animation — played on a hand that collided with opponent's hand */
-  .hand.bump {
-    animation: handBump 0.22s cubic-bezier(.36,.07,.19,.97) both;
-  }
-  @keyframes handBump {
-    0%, 100% { translate: 0 0; }
-    25%      { translate: -6px 2px; }
-    75%      { translate: 6px 2px; }
-  }
-
-  /* Reveal countdown overlay */
-  .reveal-countdown {
-    position: fixed;
-    top: 50%; left: 50%;
-    transform: translate(-50%, -50%);
-    font-family: 'Cormorant Garamond', serif;
-    font-size: 160px;
-    font-weight: 600;
-    color: var(--cream);
-    -webkit-text-stroke: 3px oklch(0.22 0.04 40);
-    paint-order: stroke fill;
-    text-shadow: 0 0 40px oklch(0.62 0.13 55 / 0.6), 0 6px 20px oklch(0.15 0.04 40 / 0.6);
-    pointer-events: none;
-    z-index: 28;
-    animation: countdownPop 0.9s cubic-bezier(.2,1.4,.4,1) forwards;
-    line-height: 1;
-  }
-  @keyframes countdownPop {
-    0%   { opacity: 0; transform: translate(-50%, -50%) scale(0.4); }
-    20%  { opacity: 1; transform: translate(-50%, -50%) scale(1.1); }
-    70%  { opacity: 1; transform: translate(-50%, -50%) scale(1); }
-    100% { opacity: 0; transform: translate(-50%, -50%) scale(1.3); }
-  }
   @keyframes ghostHover {
     0%, 100% { transform: translate(-50%, -14%) scale(1); }
     50%      { transform: translate(-50%, -22%) scale(1.02); }
@@ -1019,8 +951,7 @@ const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
   "seedsPerHole": 7,
   "seedColor": "ivory",
   "seedSize": 30,
-  "startStyle": "simultaneous",
-  "openerMode": "classic"
+  "startStyle": "simultaneous"
 }/*EDITMODE-END*/;
 </script>
 
@@ -1224,13 +1155,6 @@ function App() {
   const [seedColor, setSeedColor] = useState(tweaks.seedColor || 'terracotta');
   const [seedSize, setSeedSize] = useState(tweaks.seedSize || 22);
   const [startStyle, setStartStyle] = useState(tweaks.startStyle || 'alternating');
-  // Opener UX style when startStyle === 'simultaneous':
-  //   'classic' = original live-race (playMoveParallel with waitForPath collisions)
-  //   'reveal'  = commit-and-reveal (both players pick privately, synchronized animation)
-  const [openerMode, setOpenerMode] = useState(tweaks.openerMode || 'classic');
-  // Reveal-mode state
-  const [openerCommits, setOpenerCommits] = useState({0: null, 1: null}); // committed picks this round
-  const [revealCountdown, setRevealCountdown] = useState(null); // null | 3 | 2 | 1
   const [roundMoveCount, setRoundMoveCount] = useState(0); // # of moves completed this round (total across both players)
   const [board, setBoard] = useState(() => makeInitialBoard(seedsPerHole));
   const [currentPlayer, setCurrentPlayer] = useState(0);
@@ -1331,14 +1255,6 @@ function App() {
     }
   }, [startStyle]);
 
-  // Persist opener mode
-  useEffect(() => {
-    if (openerMode !== tweaks.openerMode) {
-      setTweaks(t => ({...t, openerMode}));
-      window.parent.postMessage({type: '__edit_mode_set_keys', edits: {openerMode}}, '*');
-    }
-  }, [openerMode]);
-
   // Announce turn changes (alternating phase only). Skip the very first mount.
   const prevPlayerRef = useRef(null);
   useEffect(() => {
@@ -1375,13 +1291,6 @@ function App() {
     if (phaseRef.current === 'opener-sim') {
       if (openerDoneRef.current[p]) return false;
       if (hands[p]) return false;
-      if (openerMode === 'reveal') {
-        // Reveal mode: can't re-commit, can't act during countdown
-        if (openerCommits[p] != null) return false;
-        if (revealCountdown != null) return false;
-        return true;
-      }
-      // Classic mode: independent — as long as not mid-sow
       return !busyRef.current[p];
     } else {
       return currentPlayer === p && !isAnimating;
@@ -1428,25 +1337,6 @@ function App() {
   // but we must assign the ref from a hook call that runs BEFORE the return.
   const playMoveSafeRef = useRef(null);
   useEffect(() => { playMoveSafeRef.current = playMoveSafe; });
-
-  // Reveal-mode trigger: fire reveal when both non-done players have committed
-  // AND neither is currently animating. Per-player animation lifecycle means a
-  // fast player can commit their next pick while the other is still sowing.
-  const animatingRef = useRef({ 0: false, 1: false });
-  const isFirstRevealRef = useRef(true);
-  useEffect(() => {
-    if (phaseRef.current !== 'opener-sim') return;
-    if (openerMode !== 'reveal') return;
-    if (revealCountdown != null) return;
-    if (winner != null) return;
-    if (animatingRef.current[0] || animatingRef.current[1]) return;
-    const need = [0, 1].filter(p => !openerDoneRef.current[p]);
-    if (need.length === 0) return;
-    const allCommitted = need.every(p => openerCommits[p] != null);
-    if (allCommitted) {
-      runOpenerReveal(openerCommits);
-    }
-  }, [openerCommits, openerMode, phase, winner]);
 
   // Auto-place cursor when it's a player's turn and they have no cursor set
   useEffect(() => {
@@ -1541,10 +1431,6 @@ function App() {
     handAtRef.current = {0: null, 1: null};
     busyRef.current = {0: false, 1: false};
     openerDoneRef.current = {0: false, 1: false};
-    setOpenerCommits({0: null, 1: null});
-    setRevealCountdown(null);
-    if (animatingRef && animatingRef.current) animatingRef.current = {0: false, 1: false};
-    if (isFirstRevealRef) isFirstRevealRef.current = true;
     const initialPhase = style === 'simultaneous' ? 'opener-sim' : 'alternating';
     setPhase(initialPhase);
     phaseRef.current = initialPhase;
@@ -1595,13 +1481,11 @@ function App() {
 
   // In simultaneous-opener phase, both sides are playable independently (as long as that player isn't already sowing)
   const inOpener = phase === 'opener-sim';
-  // Reveal mode adds: disabled while committed or during the 3-2-1 countdown.
-  const revealBlock = (p) => openerMode === 'reveal' && (openerCommits[p] != null || revealCountdown != null);
   const canBottomPlay = inOpener
-    ? (!hands[0] && !winner && !openerDoneRef.current[0] && !revealBlock(0))
+    ? (!hands[0] && !winner && !openerDoneRef.current[0])
     : (currentPlayer === 0 && !isAnimating && !winner);
   const canTopPlay = inOpener
-    ? (!hands[1] && !winner && !openerDoneRef.current[1] && !revealBlock(1))
+    ? (!hands[1] && !winner && !openerDoneRef.current[1])
     : (currentPlayer === 1 && !isAnimating && !winner);
 
   const p0Active = inOpener ? !winner : (currentPlayer === 0 && !winner);
@@ -1669,13 +1553,10 @@ function App() {
               )}
             </div>
           ))}
-          {/* Ghost cursor hands — shown over each player's selected hole when they can act.
-              In reveal mode, if the player has committed a pick, the ghost locks onto that hole
-              with a .committed visual (golden pulse + ✓ badge). */}
+          {/* Ghost cursor hands — shown over each player's selected hole when they can act */}
           {[0, 1].map(p => {
-            if (!canPlayerAct(p) && openerCommits[p] == null) return null;
-            const committed = openerMode === 'reveal' && openerCommits[p] != null;
-            const idx = committed ? openerCommits[p] : cursorHole[p];
+            if (!canPlayerAct(p)) return null;
+            const idx = cursorHole[p];
             if (idx == null) return null;
             if (hands[p] || (p === currentPlayer && hand)) return null; // don't double-render during sowing
             const pos = positionFor({type: 'hole', idx});
@@ -1683,7 +1564,7 @@ function App() {
             return (
               <div
                 key={"ghost-" + p}
-                className={"hand ghost" + (p === 1 ? " flipped" : "") + (committed ? " committed" : "")}
+                className={"hand ghost" + (p === 1 ? " flipped" : "")}
                 style={{ left: pos.x + 'px', top: pos.y - 40 + 'px' }}>
                 <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                   <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
@@ -1802,9 +1683,6 @@ function App() {
 
       {/* Announcements */}
       {announce && <div className="announce" key={announce.id}>{announce.txt}</div>}
-
-      {/* Reveal-mode countdown (3-2-1 before both hands animate in sync) */}
-      {revealCountdown != null && <div className="reveal-countdown" key={'rc-' + revealCountdown}>{revealCountdown}</div>}
 
       {/* Confetti */}
       {confetti.length > 0 && (
@@ -1950,29 +1828,9 @@ function App() {
           </div>
           <div className="tweak-row">
             <div className="tweak-label">Start style</div>
-            <div className="seed-choice" style={{gridTemplateColumns: '1fr'}}>
-              <button
-                className={startStyle === 'simultaneous' && openerMode === 'classic' ? 'active' : ''}
-                onClick={() => {
-                  if (startStyle !== 'simultaneous' || openerMode !== 'classic') {
-                    setStartStyle('simultaneous'); setOpenerMode('classic');
-                    resetGame(undefined, 'simultaneous');
-                  }
-                }}
-                style={{fontSize: 16}}>Simultaneous — classic</button>
-              <button
-                className={startStyle === 'simultaneous' && openerMode === 'reveal' ? 'active' : ''}
-                onClick={() => {
-                  if (startStyle !== 'simultaneous' || openerMode !== 'reveal') {
-                    setStartStyle('simultaneous'); setOpenerMode('reveal');
-                    resetGame(undefined, 'simultaneous');
-                  }
-                }}
-                style={{fontSize: 16}}>Simultaneous — reveal</button>
-              <button
-                className={startStyle === 'alternating' ? 'active' : ''}
-                onClick={() => { if (startStyle !== 'alternating') { setStartStyle('alternating'); resetGame(undefined, 'alternating'); } }}
-                style={{fontSize: 16}}>Alternating</button>
+            <div className="seed-choice" style={{gridTemplateColumns: '1fr 1fr'}}>
+              <button className={startStyle === 'simultaneous' ? 'active' : ''} onClick={() => { if (startStyle !== 'simultaneous') { setStartStyle('simultaneous'); resetGame(undefined, 'simultaneous'); } }}>Simultaneous</button>
+              <button className={startStyle === 'alternating' ? 'active' : ''} onClick={() => { if (startStyle !== 'alternating') { setStartStyle('alternating'); resetGame(undefined, 'alternating'); } }}>Alternating</button>
             </div>
           </div>
           <div className="tweak-row">
@@ -1988,252 +1846,15 @@ function App() {
   function playMoveSafe(startHole) {
     if (phaseRef.current === 'opener-sim') {
       const p = isOwnSide(startHole, 0) ? 0 : 1;
-      if (openerMode === 'reveal') {
-        commitOpenerPick(p, startHole);
-      } else {
-        playMoveParallel(p, startHole);
-      }
+      playMoveParallel(p, startHole);
     } else {
       playMoveV2(startHole);
     }
   }
 
-  // ===== Reveal-mode commit flow =====
-  // Player commits a pick: stored in state, ghost locks in "committed" visual.
-  // When all non-done players have committed, trigger reveal (countdown + reducer + animator).
-  function commitOpenerPick(player, hole) {
-    if (winner != null) return;
-    if (revealCountdown != null) return;           // already revealing
-    if (openerCommits[player] != null) return;     // already committed this round
-    if (openerDoneRef.current[player]) return;     // this player is done
-    if (!isOwnSide(hole, player)) return;
-    if (boardRef.current.holes[hole] === 0) return;
-    // Lock pick
-    setOpenerCommits(prev => ({ ...prev, [player]: hole }));
-  }
-
-  // (useEffect for "both committed → reveal" moved before JSX return — see top of component)
-
-  async function runOpenerReveal(commits) {
-    const myToken = abortRef.current;
-    const aborted = () => abortRef.current !== myToken;
-
-    // Mark active players as animating — gates the effect from re-firing.
-    const activeNow = [0, 1].filter(p => !openerDoneRef.current[p] && commits[p] != null);
-    for (const p of activeNow) animatingRef.current[p] = true;
-
-    // 3-2-1 countdown only on the first reveal of the game (dramatic opener).
-    if (isFirstRevealRef.current) {
-      isFirstRevealRef.current = false;
-      for (let n = 3; n >= 1; n--) {
-        if (aborted()) return;
-        setRevealCountdown(n);
-        await sleep(700);
-      }
-      setRevealCountdown(null);
-      if (aborted()) return;
-    }
-
-    // Build reducer input from CURRENT live refs (which are mutated by the
-    // animator as it plays — so round 2+ sees round 1's end state).
-    const stateSnapshot = {
-      holes: boardRef.current.holes.slice(),
-      rumah: boardRef.current.rumah.slice(),
-      turn: currentPlayer,
-      phase: 'opener-sim',
-      openerDone: [openerDoneRef.current[0], openerDoneRef.current[1]],
-      seedsPerHole,
-      winner: null,
-      seq: 0,
-    };
-    const picks = [
-      openerDoneRef.current[0] ? null : commits[0],
-      openerDoneRef.current[1] ? null : commits[1],
-    ];
-    const result = window.CongkakEngine.reducer(stateSnapshot, { type: 'opener_round', picks });
-    if (result.events.length === 1 && result.events[0].kind === 'invalid') {
-      setOpenerCommits({ 0: null, 1: null });
-      for (const p of activeNow) animatingRef.current[p] = false;
-      return;
-    }
-
-    setIsAnimating(true);
-    try { getCtx(); } catch (e) {}
-
-    // Split events per player; streams share the mutable boardRef.current.
-    const byPlayer = { 0: [], 1: [] };
-    for (const ev of result.events) if (ev.player != null) byPlayer[ev.player].push(ev);
-    await Promise.all([
-      animatePlayerStream(0, byPlayer[0], aborted),
-      animatePlayerStream(1, byPlayer[1], aborted),
-    ]);
-    if (aborted()) { setIsAnimating(false); return; }
-
-    // Sync React board state to the authoritative reducer output.
-    setBoard({ holes: result.state.holes.slice(), rumah: result.state.rumah.slice() });
-    boardRef.current = { holes: result.state.holes.slice(), rumah: result.state.rumah.slice() };
-    setActiveHole(null);
-    setIsAnimating(false);
-
-    if (result.state.winner) {
-      setWinner(result.state.winner);
-      if (result.state.winner.player >= 0) { sfxWin(); burstConfetti(); }
-    } else if (result.state.phase === 'alternating') {
-      setPhase('alternating');
-      phaseRef.current = 'alternating';
-      setCurrentPlayer(result.state.turn);
-      announceText('turn-based play begins', 1200);
-    }
-  }
-
-  async function animatePlayerStream(player, events, aborted) {
-    // Stream mutates boardRef.current directly so other streams + round N+1
-    // reducer calls see a live, consistent board.
-    const b = boardRef.current;
-
-    const PICKUP_MS = 260;
-    const MOVE_MS = 220;
-    const SETTLE_MS = 40;
-    const DROP_AFTER_MS = 90;
-    const BUMP_MS = 220;
-    const CHAIN_WAIT_MS = 220;
-
-    const setMyHand = (updater) => {
-      setHands(prev => {
-        const cur = prev[player];
-        const next = typeof updater === 'function' ? updater(cur) : updater;
-        return { ...prev, [player]: next };
-      });
-    };
-
-    // Determine this player's terminal result by scanning the event stream.
-    // Used at stream end to update openerDoneRef[player].
-    let lastTerminal = null;
-
-    let prevWasDrop = false;
-
-    for (const ev of events) {
-      if (aborted()) return;
-
-      if (ev.kind === 'pickup') {
-        if (prevWasDrop) {
-          await sleep(CHAIN_WAIT_MS);
-          if (aborted()) return;
-        }
-        b.holes[ev.hole] = 0;
-        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
-        const pos = positionFor({ type: 'hole', idx: ev.hole });
-        if (pos) setMyHand({ x: pos.x, y: pos.y - 40, carrying: ev.count, player });
-        await sleep(PICKUP_MS);
-        prevWasDrop = false;
-      } else if (ev.kind === 'drop') {
-        const pos = positionFor(ev.at);
-        if (pos) setMyHand(h => h ? { ...h, x: pos.x, y: pos.y - 40 } : h);
-        await sleep(MOVE_MS + SETTLE_MS);
-        if (aborted()) return;
-        if (ev.at.type === 'hole') b.holes[ev.at.idx] += 1;
-        else b.rumah[ev.at.p] += 1;
-        setMyHand(h => h ? { ...h, carrying: (h.carrying != null ? h.carrying - 1 : h.carrying) } : h);
-        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
-        sfxDrop();
-        await sleep(DROP_AFTER_MS);
-        prevWasDrop = true;
-      } else if (ev.kind === 'bump') {
-        setMyHand(h => h ? { ...h, bump: true } : h);
-        sfxBump();
-        await sleep(BUMP_MS);
-        if (aborted()) return;
-        setMyHand(h => h ? { ...h, bump: false } : h);
-        prevWasDrop = false;
-      } else if (ev.kind === 'anotherTurn') {
-        sfxRumah();
-        announceText((player === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
-        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
-        lastTerminal = 'anotherTurn';
-        prevWasDrop = false;
-      } else if (ev.kind === 'tikam') {
-        setMyHand(null);
-        setCaptureFlashes(prev => new Set([...prev, ev.landedHole, ev.oppHole]));
-        setBoardShake(true);
-        sfxCapture();
-        announceText((player === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
-        await sleep(650);
-        if (aborted()) return;
-        const oppPos = positionFor({ type: 'hole', idx: ev.oppHole });
-        const landPos = positionFor({ type: 'hole', idx: ev.landedHole });
-        const rumahPos = positionFor({ type: 'rumah', p: player });
-        if (oppPos && landPos && rumahPos) {
-          const fliers = [];
-          const baseId = Date.now() + '-' + player;
-          const jitter = () => (Math.random() - 0.5) * 24;
-          for (let k = 0; k < ev.oppCount; k++) {
-            fliers.push({
-              id: baseId + '-o-' + k,
-              fromX: oppPos.x + jitter(), fromY: oppPos.y + jitter(),
-              toX: rumahPos.x + jitter(), toY: rumahPos.y + jitter(),
-              delay: k * 55,
-            });
-          }
-          for (let k = 0; k < ev.landCount; k++) {
-            fliers.push({
-              id: baseId + '-l-' + k,
-              fromX: landPos.x + jitter(), fromY: landPos.y + jitter(),
-              toX: rumahPos.x + jitter(), toY: rumahPos.y + jitter(),
-              delay: 200 + k * 55,
-            });
-          }
-          setFlyingSeeds(prev => [...prev, ...fliers]);
-          b.holes[ev.oppHole] = 0;
-          b.holes[ev.landedHole] = 0;
-          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
-          const totalDuration = 200 + Math.max(ev.oppCount, ev.landCount) * 55 + 900;
-          await sleep(totalDuration - 200);
-          if (aborted()) return;
-          b.rumah[player] += ev.loot;
-          setRumahFlash(prev => new Set([...prev, player]));
-          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
-          await sleep(250);
-          setFlyingSeeds([]);
-        } else {
-          b.holes[ev.oppHole] = 0;
-          b.holes[ev.landedHole] = 0;
-          b.rumah[player] += ev.loot;
-          setRumahFlash(prev => new Set([...prev, player]));
-          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
-        }
-        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + ev.loot + ' seeds.');
-        await sleep(450);
-        setCaptureFlashes(new Set());
-        setBoardShake(false);
-        setRumahFlash(new Set());
-        lastTerminal = 'tikam';
-        prevWasDrop = false;
-      } else if (ev.kind === 'noCapture') {
-        const who = player === 0 ? 'Player One' : 'Player Two';
-        setLastAction(ev.reason === 'notPassedRumah'
-          ? who + ' landed empty — but hadn’t passed their rumah yet. No tikam.'
-          : who + ' landed empty — nothing across.');
-        lastTerminal = 'noCapture';
-        prevWasDrop = false;
-      } else if (ev.kind === 'mati') {
-        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
-        lastTerminal = 'mati';
-        prevWasDrop = false;
-      }
-    }
-
-    // End of this player's stream: per-player cleanup so they can commit their
-    // next pick IMMEDIATELY, even if the other player is still sowing.
-    if (aborted()) return;
-    if (lastTerminal && lastTerminal !== 'anotherTurn') {
-      openerDoneRef.current[player] = true;
-    }
-    animatingRef.current[player] = false;
-    setOpenerCommits(prev => ({ ...prev, [player]: null }));
-    setTimeout(() => {
-      setHands(prev => ({ ...prev, [player]: null }));
-    }, 280);
-  }
+  // Reveal-mode helpers removed: classic (independent live-race) is the only
+  // simultaneous-opener style for local play. The commit-and-reveal flow will
+  // be reintroduced for multiplayer via a dedicated MP network path.
 
   // ===== Animator =====
   // Consumes the event list from engine.reducer() and drives all DOM/sound/hand
