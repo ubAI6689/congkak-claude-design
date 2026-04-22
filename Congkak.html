@@ -1240,6 +1240,12 @@ function App() {
   // MP: which players currently have an in-flight animator (covers tikam gap
   // where hands[p] is briefly null but player is still mid-move).
   const [mpAnimating, setMpAnimating] = useState({0: false, 1: false});
+  // Sync-access version of mpAnimating for race-safe decisions inside the
+  // animator. Also the "latest server broadcast" (highest seq) — when two
+  // moves overlap in wall-clock time, only the LAST-to-finish animator snaps
+  // to the authoritative state, using the HIGHEST-seq finalState.
+  const mpAnimatingRef = useRef({0: false, 1: false});
+  const latestMoveRef = useRef({seq: -1, finalState: null});
   const [flyingSeeds, setFlyingSeeds] = useState([]);
   // Keyboard cursor: which hole each player is highlighting (null = none)
   const [cursorHole, setCursorHole] = useState({0: null, 1: null});
@@ -1503,6 +1509,7 @@ function App() {
     setHand(null);
     setHands({0: null, 1: null});
     setMpAnimating({0: false, 1: false});
+    mpAnimatingRef.current = {0: false, 1: false};
     setFlyingSeeds([]);
     setRumahFlash(new Set());
     boardRef.current = {holes: [...fresh.holes], rumah: [...fresh.rumah]};
@@ -1545,6 +1552,7 @@ function App() {
       if (msg.type === 'room_joined') {
         setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
         setNetMode('online');
+        latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         // Snap to authoritative server state
         if (msg.gameState) {
           const g = msg.gameState;
@@ -1563,6 +1571,10 @@ function App() {
         setNetError(msg.reason || 'room error');
         setNetStatus('error');
       } else if (msg.type === 'move_applied') {
+        // Track the latest-seq server state for post-animation snap.
+        if (msg.seq > latestMoveRef.current.seq) {
+          latestMoveRef.current = { seq: msg.seq, finalState: msg.state };
+        }
         // Concurrent animator call (shared boardRef, hands[p] updated by mover).
         animateOnlineEvents(msg.events, msg.move.player, msg.state);
       } else if (msg.type === 'move_rejected') {
@@ -2157,6 +2169,7 @@ function App() {
   // concurrently (fast player's move starts animating while opponent's is
   // still in flight). Each run mutates boardRef directly.
   async function animateOnlineEvents(events, moverPlayer, finalState) {
+    mpAnimatingRef.current[moverPlayer] = true;
     setMpAnimating(prev => ({ ...prev, [moverPlayer]: true }));
     const PICKUP_MS = 260;
     const MOVE_MS = 220;
@@ -2264,21 +2277,36 @@ function App() {
       }
     }
 
-    // Commit final authoritative state from server.
-    setBoard({ holes: finalState.holes.slice(), rumah: finalState.rumah.slice() });
-    boardRef.current = { holes: finalState.holes.slice(), rumah: finalState.rumah.slice() };
-    openerDoneRef.current = { 0: finalState.openerDone[0], 1: finalState.openerDone[1] };
-    if (finalState.phase !== phaseRef.current) {
-      setPhase(finalState.phase);
-      phaseRef.current = finalState.phase;
+    // Mark this animator as done BEFORE deciding to snap, so the other
+    // animator (if running) sees us as not-running.
+    mpAnimatingRef.current[moverPlayer] = false;
+
+    // Race-safe commit: if the OTHER player is still animating, do NOT snap
+    // boardRef — that would wipe their partial mutations. The last animator
+    // to finish will snap to the latest-seq finalState the server broadcast.
+    // When solo (no overlap), this is the normal case.
+    const otherAnimating = mpAnimatingRef.current[1 - moverPlayer];
+    if (!otherAnimating) {
+      // Prefer the highest-seq finalState the server has broadcast. If this
+      // animator's finalState IS the latest (common case: seq matches), we use it.
+      const snap = (latestMoveRef.current.finalState) || finalState;
+      setBoard({ holes: snap.holes.slice(), rumah: snap.rumah.slice() });
+      boardRef.current = { holes: snap.holes.slice(), rumah: snap.rumah.slice() };
+      openerDoneRef.current = { 0: snap.openerDone[0], 1: snap.openerDone[1] };
+      if (snap.phase !== phaseRef.current) {
+        setPhase(snap.phase);
+        phaseRef.current = snap.phase;
+      }
+      setCurrentPlayer(snap.turn);
+      if (snap.winner) {
+        setWinner(snap.winner);
+        if (snap.winner.player >= 0) { sfxWin(); burstConfetti(); }
+      }
     }
-    setCurrentPlayer(finalState.turn);
+    // Even mid-overlap, update per-player hand cleanup and UI bits that only
+    // concern THIS animator's player.
     setActiveHole(null);
     setTimeout(() => setHands(prev => ({ ...prev, [moverPlayer]: null })), 280);
-    if (finalState.winner) {
-      setWinner(finalState.winner);
-      if (finalState.winner.player >= 0) { sfxWin(); burstConfetti(); }
-    }
     // Clear the MP animating flag after the hand-clear setTimeout fires, so the
     // banner doesn't flash on during the brief hand-null cleanup gap.
     setTimeout(() => setMpAnimating(prev => ({ ...prev, [moverPlayer]: false })), 300);
