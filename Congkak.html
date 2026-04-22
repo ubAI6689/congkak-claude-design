@@ -1229,6 +1229,8 @@ function App() {
   const [netStatus, setNetStatus] = useState('idle'); // idle | connecting | connected | error
   const [netRoom, setNetRoom] = useState(null); // { code, seat, clientId, peers }
   const [netError, setNetError] = useState(null);
+  // Rematch state: { requesterSeat } while a new-round request is in flight.
+  const [netRematch, setNetRematch] = useState(null);
   const netWsRef = useRef(null);
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
@@ -1579,6 +1581,40 @@ function App() {
         animateOnlineEvents(msg.events, msg.move.player, msg.state);
       } else if (msg.type === 'move_rejected') {
         setLastAction('move rejected: ' + msg.reason);
+      } else if (msg.type === 'new_round_requested') {
+        setNetRematch({ requesterSeat: msg.by });
+      } else if (msg.type === 'new_round_declined') {
+        setNetRematch(null);
+        setLastAction('Rematch declined.');
+      } else if (msg.type === 'new_round_applied') {
+        // Abort any in-flight animators and snap to the fresh game state.
+        abortRef.current += 1;
+        setNetRematch(null);
+        latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
+        const g = msg.gameState;
+        if (g) {
+          setBoard({ holes: g.holes.slice(), rumah: g.rumah.slice() });
+          boardRef.current = { holes: g.holes.slice(), rumah: g.rumah.slice() };
+          setPhase(g.phase);
+          phaseRef.current = g.phase;
+          openerDoneRef.current = { 0: g.openerDone[0], 1: g.openerDone[1] };
+          setCurrentPlayer(g.turn);
+          setWinner(null);
+          setConfetti([]);
+          setAnnounce(null);
+          setHand(null);
+          setHands({0: null, 1: null});
+          setActiveHole(null);
+          setFlyingSeeds([]);
+          setRumahFlash(new Set());
+          setCaptureFlashes(new Set());
+          setIsAnimating(false);
+          setBoardShake(false);
+          setLastAction('New round started.');
+          setAnimKey(k => k + 1);
+          mpAnimatingRef.current = {0: false, 1: false};
+          setMpAnimating({0: false, 1: false});
+        }
       }
     });
     return ws;
@@ -1609,6 +1645,8 @@ function App() {
     setNetRoom(null);
     setNetMode('local');
   }
+  function netRequestNewRound() { netSend({ type: 'request_new_round' }); }
+  function netRespondNewRound(accept) { netSend({ type: 'respond_new_round', accept }); }
 
   // Auto-join from URL param on first load: ?room=ABCDEF
   useEffect(() => {
@@ -1722,7 +1760,10 @@ function App() {
               {' · '}{netRoom.peers && netRoom.peers[1 - netRoom.seat]?.connected ? 'opponent ✓' : 'waiting…'}
             </span>
           )}
-          <button className="btn" onClick={() => resetGame()}>New round</button>
+          <button className="btn" onClick={() => {
+            if (netMode === 'online' && netRoom) netRequestNewRound();
+            else resetGame();
+          }}>New round</button>
         </div>
       </header>
 
@@ -1970,6 +2011,36 @@ function App() {
           </div>
         </div>
       )}
+
+      {/* Rematch prompt (MP) — requester sees "waiting", opponent sees YES/NO */}
+      {netMode === 'online' && netRoom && netRematch && (() => {
+        const iAmRequester = netRematch.requesterSeat === netRoom.seat;
+        return (
+          <div className="overlay" onClick={(e) => e.stopPropagation()}>
+            <div className="modal" style={{position:'relative', maxWidth: 480, textAlign:'center'}}>
+              <div className="eyebrow">Rematch</div>
+              {iAmRequester ? (
+                <>
+                  <h2>Waiting for <em>opponent</em>…</h2>
+                  <p style={{marginTop: 12}}>They'll see a prompt to accept or decline.</p>
+                  <div className="actions" style={{justifyContent:'center'}}>
+                    <button className="btn" onClick={() => netRespondNewRound(false)}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2>Opponent wants a <em>new round</em>.</h2>
+                  <p style={{marginTop: 12}}>The current game will reset.</p>
+                  <div className="actions" style={{justifyContent:'center'}}>
+                    <button className="btn" onClick={() => netRespondNewRound(false)}>No</button>
+                    <button className="btn primary" onClick={() => netRespondNewRound(true)}>Yes</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Online lobby modal */}
       {netMode === 'online-lobby' && (

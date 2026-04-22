@@ -100,6 +100,7 @@ function handleCreateRoom(ws, state) {
     players: [player, null],
     gameState: freshGameState(),
     seq: 0,
+    pendingNewRoundBy: null,  // null | 0 | 1 — seat that has requested a rematch
     createdAt: Date.now(),
     lastActivity: Date.now(),
   };
@@ -151,6 +152,57 @@ function handleRejoinRoom(ws, state, msg) {
   send(ws, { type: 'room_joined', code, seat, clientId: msg.clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
   sendRoomUpdate(room);
   log(`room ${code} rejoined by seat ${seat}`);
+}
+
+function handleRequestNewRound(ws, state) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return;
+  const seat = state.seat;
+  if (seat == null) return;
+  if (room.pendingNewRoundBy === seat) return; // duplicate request — ignore
+  if (room.pendingNewRoundBy != null && room.pendingNewRoundBy !== seat) {
+    // Mutual agreement — both requested
+    return applyNewRound(room);
+  }
+  // First request: mark pending, notify both sides
+  room.pendingNewRoundBy = seat;
+  broadcastRoom(room, { type: 'new_round_requested', by: seat });
+  log(`room ${room.code} new round requested by seat ${seat}`);
+}
+
+function handleRespondNewRound(ws, state, msg) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return;
+  if (room.pendingNewRoundBy == null) return;
+  const seat = state.seat;
+  if (seat == null) return;
+  // Requester can cancel their own pending request (treat as decline).
+  if (seat === room.pendingNewRoundBy) {
+    if (msg.accept) return; // can't self-accept
+    room.pendingNewRoundBy = null;
+    broadcastRoom(room, { type: 'new_round_declined', by: seat });
+    log(`room ${room.code} new round cancelled by requester seat ${seat}`);
+    return;
+  }
+  if (msg.accept) {
+    return applyNewRound(room);
+  }
+  room.pendingNewRoundBy = null;
+  broadcastRoom(room, { type: 'new_round_declined', by: seat });
+  log(`room ${room.code} new round declined by seat ${seat}`);
+}
+
+function applyNewRound(room) {
+  room.gameState = freshGameState();
+  room.seq += 1;
+  room.pendingNewRoundBy = null;
+  room.lastActivity = Date.now();
+  broadcastRoom(room, {
+    type: 'new_round_applied',
+    gameState: room.gameState,
+    seq: room.seq,
+  });
+  log(`room ${room.code} new round applied (seq=${room.seq})`);
 }
 
 function handlePlayMove(ws, state, msg) {
@@ -262,8 +314,10 @@ wss.on('connection', (ws, req) => {
       case 'join_room':    return handleJoinRoom(ws, state, msg);
       case 'rejoin_room':  return handleRejoinRoom(ws, state, msg);
       case 'leave_room':   return handleLeaveRoom(ws, state);
-      case 'play_move':    return handlePlayMove(ws, state, msg);
-      default:             return send(ws, { type: 'echo', payload: msg });
+      case 'play_move':         return handlePlayMove(ws, state, msg);
+      case 'request_new_round': return handleRequestNewRound(ws, state);
+      case 'respond_new_round': return handleRespondNewRound(ws, state, msg);
+      default:                  return send(ws, { type: 'echo', payload: msg });
     }
   });
 
