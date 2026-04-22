@@ -1641,11 +1641,16 @@ function App() {
           latestMoveRef.current = { seq: msg.seq, finalState: msg.state };
         }
         setNetOpenerPicks([null, null]);
-        animateOpenerRoundEvents(msg.events, msg.state);
-        // If both players finished opener same round, the round ends with
-        // awaitingTiebreaker=true — show RPS modal after animation completes.
+        const animPromise = animateOpenerRoundEvents(msg.events, msg.state);
+        // Show RPS modal AFTER the animation actually finishes (variable
+        // duration depending on chain length / tikam). Small post-delay
+        // lets the hand-clear setTimeout fire first for visual cleanness.
         if (msg.state.awaitingTiebreaker) {
-          setTimeout(() => setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null }), 1500);
+          animPromise.then(() => {
+            setTimeout(() => {
+              setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null });
+            }, 500);
+          });
         }
       } else if (msg.type === 'tiebreaker_picks_update') {
         setNetTiebreaker(prev => prev ? { ...prev, picksStatus: msg.status } : { myChoice: null, picksStatus: msg.status, reveal: null });
