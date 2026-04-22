@@ -1277,6 +1277,9 @@ function App() {
   // MP opener-sim: per-player committed pick for the current lockstep round.
   // Mirrors the server's state; updated on opener_picks_update broadcasts.
   const [netOpenerPicks, setNetOpenerPicks] = useState([null, null]);
+  // Tiebreaker (RPS) state when both players end opener same round.
+  // shape: null | { myChoice: 'rock'|'paper'|'scissors'|null, picksStatus: [bool, bool], reveal: {choices, winner} | null }
+  const [netTiebreaker, setNetTiebreaker] = useState(null);
   const netWsRef = useRef(null);
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
@@ -1601,6 +1604,7 @@ function App() {
         setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
         setNetMode('online');
         setNetOpenerPicks([null, null]);
+        setNetTiebreaker(null);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         // Snap to authoritative server state
         if (msg.gameState) {
@@ -1638,6 +1642,31 @@ function App() {
         }
         setNetOpenerPicks([null, null]);
         animateOpenerRoundEvents(msg.events, msg.state);
+        // If both players finished opener same round, the round ends with
+        // awaitingTiebreaker=true — show RPS modal after animation completes.
+        if (msg.state.awaitingTiebreaker) {
+          setTimeout(() => setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null }), 1500);
+        }
+      } else if (msg.type === 'tiebreaker_picks_update') {
+        setNetTiebreaker(prev => prev ? { ...prev, picksStatus: msg.status } : { myChoice: null, picksStatus: msg.status, reveal: null });
+      } else if (msg.type === 'tiebreaker_tie') {
+        // Brief reveal then reset for another round of RPS.
+        setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: { choices: msg.choices, winner: null } });
+        setTimeout(() => setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null }), 2000);
+      } else if (msg.type === 'tiebreaker_result') {
+        if (msg.seq > latestMoveRef.current.seq) {
+          latestMoveRef.current = { seq: msg.seq, finalState: msg.state };
+        }
+        // Show reveal, then apply the state (phase change → alternating).
+        setNetTiebreaker(prev => ({ myChoice: prev?.myChoice || null, picksStatus: [true, true], reveal: { choices: msg.choices, winner: msg.winner } }));
+        setTimeout(() => {
+          setNetTiebreaker(null);
+          const snap = msg.state;
+          setPhase(snap.phase);
+          phaseRef.current = snap.phase;
+          setCurrentPlayer(snap.turn);
+          if (snap.phase === 'alternating') announceText('turn-based play begins', 1200);
+        }, 2500);
       } else if (msg.type === 'new_round_requested') {
         setNetRematch({ requesterSeat: msg.by });
       } else if (msg.type === 'new_round_declined') {
@@ -1648,6 +1677,7 @@ function App() {
         abortRef.current += 1;
         setNetRematch(null);
         setNetOpenerPicks([null, null]);
+        setNetTiebreaker(null);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         const g = msg.gameState;
         if (g) {
@@ -1705,6 +1735,11 @@ function App() {
   }
   function netRequestNewRound() { netSend({ type: 'request_new_round' }); }
   function netRespondNewRound(accept) { netSend({ type: 'respond_new_round', accept }); }
+  function netTiebreakerPick(choice) {
+    if (!netTiebreaker || netTiebreaker.myChoice) return;
+    netSend({ type: 'tiebreaker_pick', choice });
+    setNetTiebreaker(prev => prev ? { ...prev, myChoice: choice } : prev);
+  }
 
   // Auto-join from URL param on first load: ?room=ABCDEF
   useEffect(() => {
@@ -2075,6 +2110,74 @@ function App() {
         </div>
       )}
 
+      {/* RPS tiebreaker modal (MP) — shown when both players finish opener same round */}
+      {netMode === 'online' && netRoom && netTiebreaker && (() => {
+        const { myChoice, picksStatus, reveal } = netTiebreaker;
+        const mySeat = netRoom.seat;
+        const oppSeat = 1 - mySeat;
+        const emoji = { rock: '🪨', paper: '📄', scissors: '✂️' };
+        const labels = { rock: 'Rock', paper: 'Paper', scissors: 'Scissors' };
+        return (
+          <div className="overlay" onClick={(e) => e.stopPropagation()}>
+            <div className="modal" style={{position:'relative', maxWidth: 520, textAlign:'center'}}>
+              <div className="eyebrow">Tiebreaker</div>
+              <h2>Both done — <em>rock paper scissors</em></h2>
+              {reveal ? (
+                // Reveal state
+                <>
+                  <p style={{marginTop: 16, fontSize: 15}}>
+                    {reveal.winner == null ? 'Tie! Pick again.' : (reveal.winner === mySeat ? 'You win — you go first!' : 'Opponent wins — they go first.')}
+                  </p>
+                  <div style={{display:'flex', justifyContent:'center', gap: 40, margin: '24px 0', fontSize: 72, lineHeight: 1}}>
+                    <div style={{textAlign:'center'}}>
+                      <div>{emoji[reveal.choices[mySeat]] || '?'}</div>
+                      <div style={{fontSize: 11, marginTop: 8, fontFamily:"'JetBrains Mono', monospace", letterSpacing: '0.18em', textTransform:'uppercase', color:'var(--ink-soft)'}}>You</div>
+                    </div>
+                    <div style={{fontSize: 32, alignSelf:'center', color:'var(--ink-soft)', fontFamily:"'Cormorant Garamond', serif", fontStyle:'italic'}}>vs</div>
+                    <div style={{textAlign:'center'}}>
+                      <div>{emoji[reveal.choices[oppSeat]] || '?'}</div>
+                      <div style={{fontSize: 11, marginTop: 8, fontFamily:"'JetBrains Mono', monospace", letterSpacing: '0.18em', textTransform:'uppercase', color:'var(--ink-soft)'}}>Opponent</div>
+                    </div>
+                  </div>
+                </>
+              ) : myChoice ? (
+                // I've picked, waiting for opponent
+                <>
+                  <p style={{marginTop: 16}}>Your pick: <strong style={{fontSize: 40, verticalAlign:'middle'}}>{emoji[myChoice]}</strong></p>
+                  <p style={{color:'var(--ink-soft)', fontSize: 13}}>{picksStatus[oppSeat] ? 'Revealing…' : 'Waiting for opponent…'}</p>
+                </>
+              ) : (
+                // Pick UI
+                <>
+                  <p style={{marginTop: 12, color:'var(--ink-soft)'}}>Both of you finished the opener at the same time. Play rock-paper-scissors to decide who takes the first turn.</p>
+                  <div style={{display:'flex', justifyContent:'center', gap: 16, margin: '24px 0'}}>
+                    {['rock', 'paper', 'scissors'].map(c => (
+                      <button
+                        key={c}
+                        onClick={() => netTiebreakerPick(c)}
+                        style={{
+                          width: 96, height: 96,
+                          fontSize: 48,
+                          borderRadius: 16,
+                          border: '2px solid oklch(0.22 0.02 50 / 0.18)',
+                          background: 'oklch(1 0 0 / 0.7)',
+                          cursor: 'pointer',
+                          transition: 'all 0.15s ease',
+                        }}
+                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.borderColor = 'var(--accent)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.borderColor = 'oklch(0.22 0.02 50 / 0.18)'; }}
+                        title={labels[c]}
+                      >{emoji[c]}</button>
+                    ))}
+                  </div>
+                  {picksStatus[oppSeat] && <p style={{color:'var(--ink-soft)', fontSize: 13}}>Opponent has picked — your turn.</p>}
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
+
       {/* Rematch prompt (MP) — requester sees "waiting", opponent sees YES/NO */}
       {netMode === 'online' && netRoom && netRematch && (() => {
         const iAmRequester = netRematch.requesterSeat === netRoom.seat;
@@ -2338,7 +2441,7 @@ function App() {
       phaseRef.current = snap.phase;
       if (snap.phase === 'alternating') announceText('turn-based play begins', 1200);
     }
-    setCurrentPlayer(snap.turn);
+    if (!snap.awaitingTiebreaker) setCurrentPlayer(snap.turn);
     setActiveHole(null);
     for (const p of activePlayers) {
       setTimeout(() => setHands(prev => ({ ...prev, [p]: null })), 280);

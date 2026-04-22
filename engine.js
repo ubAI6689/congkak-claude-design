@@ -102,6 +102,10 @@
       turn: 0, // P0 first in alternating; ignored in opener-sim
       phase: startStyle === 'simultaneous' ? 'opener-sim' : 'alternating',
       openerDone: [false, false],
+      // True when both players finished opener in the SAME round and the
+      // opener→alternating transition is blocked on a tiebreaker resolution
+      // (RPS). Cleared by resolve_tiebreaker action.
+      awaitingTiebreaker: false,
       seedsPerHole: seedsPerHole,
       winner: null,
       seq: 0,
@@ -139,7 +143,35 @@
     if (action.type === 'opener_solo' && state.phase === 'opener-sim') {
       return openerSolo(state, action.player, action.hole);
     }
+    if (action.type === 'resolve_tiebreaker' && state.awaitingTiebreaker) {
+      return resolveTiebreaker(state, action.winner);
+    }
     return { state: state, events: [{ kind: 'invalid', reason: 'unknownAction' }] };
+  }
+
+  // ---------- Tiebreaker resolution ----------
+  // After RPS decides who goes first, server applies this to transition to
+  // alternating with the chosen winner. Falls back if winner has no moves.
+  function resolveTiebreaker(state, winner) {
+    if (winner !== 0 && winner !== 1) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'badWinner' }] };
+    }
+    var newTurn = winner;
+    if (!playerHasMoves(state, newTurn) && playerHasMoves(state, 1 - newTurn)) {
+      newTurn = 1 - newTurn;
+    }
+    return {
+      state: Object.assign({}, state, {
+        phase: 'alternating',
+        turn: newTurn,
+        awaitingTiebreaker: false,
+        seq: state.seq + 1,
+      }),
+      events: [
+        { kind: 'phaseChange', from: 'opener-sim', to: 'alternating' },
+        { kind: 'turnEnd', nextPlayer: newTurn },
+      ],
+    };
   }
 
   // ---------- Opener-solo (multiplayer, per-player atomic move) ----------
@@ -258,6 +290,7 @@
         turn: newTurn,
         phase: newPhase,
         openerDone: newOpenerDone,
+        awaitingTiebreaker: false,
         seedsPerHole: state.seedsPerHole,
         winner: winner,
         seq: state.seq + 1,
@@ -401,30 +434,31 @@
       winner = { player: w, scores: b.rumah.slice() };
       events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
     } else if (newOpenerDone[0] && newOpenerDone[1]) {
-      // Both players finished opener → switch to alternating.
-      //
-      // Rule for "who goes first in alternating":
-      //   - Both ended this same round: underdog goes first. Player with fewer
-      //     seeds in their rumah takes the first alternating turn; tiebreak P0.
-      //   - Only one active this round (the other finished earlier): the one
-      //     who finished earlier (was waiting) goes first — compensates for
-      //     the wait. Falls back to the mover if waiter has no moves.
-      newPhase = 'alternating';
+      // Both players finished opener → need to decide who goes first in alternating.
       var bothActiveThisRound = picks[0] != null && picks[1] != null;
       if (bothActiveThisRound) {
-        var underdog;
-        if (b.rumah[0] < b.rumah[1]) underdog = 0;
-        else if (b.rumah[1] < b.rumah[0]) underdog = 1;
-        else underdog = 0; // exact tie — tiebreak P0
-        if (playerHasMoves(b, underdog)) newTurn = underdog;
-        else if (playerHasMoves(b, 1 - underdog)) newTurn = 1 - underdog;
-        else newTurn = underdog; // unreachable given end-of-round check
-      } else if (picks[0] != null) {
-        // P0 finished solo this round; P1 (who finished earlier) goes first
-        newTurn = playerHasMoves(b, 1) ? 1 : 0;
-      } else {
-        newTurn = playerHasMoves(b, 0) ? 0 : 1;
+        // Both ended THIS same round — block the transition and wait for
+        // server to resolve a tiebreaker (RPS). Phase stays 'opener-sim' but
+        // no more picks are accepted while awaitingTiebreaker is true.
+        events.push({ kind: 'tiebreakerNeeded' });
+        var stateWithTiebreaker = {
+          holes: b.holes,
+          rumah: b.rumah,
+          turn: state.turn,
+          phase: state.phase,
+          openerDone: newOpenerDone,
+          awaitingTiebreaker: true,
+          seedsPerHole: state.seedsPerHole,
+          winner: null,
+          seq: state.seq + 1,
+        };
+        return { state: stateWithTiebreaker, events: events };
       }
+      // Single-active this round: the OTHER player (who finished earlier, was
+      // waiting) takes the first alternating turn. Compensates for the wait.
+      newPhase = 'alternating';
+      if (picks[0] != null) newTurn = playerHasMoves(b, 1) ? 1 : 0;
+      else                  newTurn = playerHasMoves(b, 0) ? 0 : 1;
       events.push({ kind: 'phaseChange', from: 'opener-sim', to: 'alternating' });
       events.push({ kind: 'turnEnd', nextPlayer: newTurn });
     } else {
@@ -438,6 +472,7 @@
         turn: newTurn,
         phase: newPhase,
         openerDone: newOpenerDone,
+        awaitingTiebreaker: false,
         seedsPerHole: state.seedsPerHole,
         winner: winner,
         seq: state.seq + 1,
@@ -622,6 +657,7 @@
         turn: nextPlayer,
         phase: state.phase,
         openerDone: state.openerDone.slice(),
+        awaitingTiebreaker: state.awaitingTiebreaker || false,
         seedsPerHole: state.seedsPerHole,
         winner: winner,
         seq: state.seq + 1,

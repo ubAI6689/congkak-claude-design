@@ -102,6 +102,7 @@ function handleCreateRoom(ws, state) {
     seq: 0,
     pendingNewRoundBy: null,  // null | 0 | 1 — seat that has requested a rematch
     openerPicks: [null, null], // lockstep: per-player committed pick for current opener round
+    tiebreakerPicks: [null, null], // RPS picks when awaitingTiebreaker is true
     createdAt: Date.now(),
     lastActivity: Date.now(),
   };
@@ -198,6 +199,7 @@ function applyNewRound(room) {
   room.seq += 1;
   room.pendingNewRoundBy = null;
   room.openerPicks = [null, null];
+  room.tiebreakerPicks = [null, null];
   room.lastActivity = Date.now();
   broadcastRoom(room, {
     type: 'new_round_applied',
@@ -282,6 +284,62 @@ function handleCommitOpenerPick(ws, state, msg) {
   });
   broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
   log(`room ${room.code} opener_round applied seq=${room.seq} picks=${JSON.stringify(picks)} done=${JSON.stringify(result.state.openerDone)} phase=${result.state.phase}`);
+}
+
+// Rock paper scissors tiebreak helpers
+function rpsWinner(a, b) {
+  if (a === b) return null; // tie
+  if ((a === 'rock' && b === 'scissors') ||
+      (a === 'scissors' && b === 'paper') ||
+      (a === 'paper' && b === 'rock')) return 0; // P0 wins
+  return 1; // P1 wins
+}
+
+function handleTiebreakerPick(ws, state, msg) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return;
+  if (!room.gameState.awaitingTiebreaker) return send(ws, { type: 'move_rejected', reason: 'no-tiebreaker-active' });
+  const seat = state.seat;
+  if (seat == null) return;
+  const choice = msg.choice;
+  if (!['rock', 'paper', 'scissors'].includes(choice)) return send(ws, { type: 'move_rejected', reason: 'bad-rps-choice' });
+  if (room.tiebreakerPicks[seat] != null) return; // already picked; ignore
+  room.tiebreakerPicks[seat] = choice;
+  room.lastActivity = Date.now();
+  // Broadcast picks status (hidden — don't reveal each other's choice until both picked)
+  broadcastRoom(room, {
+    type: 'tiebreaker_picks_update',
+    status: [room.tiebreakerPicks[0] != null, room.tiebreakerPicks[1] != null],
+  });
+  if (room.tiebreakerPicks[0] == null || room.tiebreakerPicks[1] == null) return;
+  // Both picked — resolve
+  const choices = room.tiebreakerPicks.slice();
+  const winner = rpsWinner(choices[0], choices[1]);
+  if (winner == null) {
+    // Tie — broadcast and reset for another round
+    room.tiebreakerPicks = [null, null];
+    broadcastRoom(room, { type: 'tiebreaker_tie', choices });
+    log(`room ${room.code} tiebreaker tie (${choices[0]} vs ${choices[1]}) — retrying`);
+    return;
+  }
+  // Winner — apply resolve_tiebreaker reducer action
+  const result = engine.reducer(room.gameState, { type: 'resolve_tiebreaker', winner });
+  if (result.events.length === 1 && result.events[0].kind === 'invalid') {
+    log(`room ${room.code} resolve_tiebreaker invalid: ${result.events[0].reason}`);
+    return;
+  }
+  room.gameState = result.state;
+  room.seq += 1;
+  room.tiebreakerPicks = [null, null];
+  broadcastRoom(room, {
+    type: 'tiebreaker_result',
+    seq: room.seq,
+    choices,
+    winner,
+    events: result.events,
+    state: result.state,
+  });
+  log(`room ${room.code} tiebreaker: ${choices[0]} vs ${choices[1]} → winner seat ${winner}`);
 }
 
 function handleUncommitOpenerPick(ws, state) {
@@ -378,6 +436,7 @@ wss.on('connection', (ws, req) => {
       case 'play_move':           return handlePlayMove(ws, state, msg);
       case 'commit_opener_pick':  return handleCommitOpenerPick(ws, state, msg);
       case 'uncommit_opener_pick':return handleUncommitOpenerPick(ws, state);
+      case 'tiebreaker_pick':     return handleTiebreakerPick(ws, state, msg);
       case 'request_new_round':   return handleRequestNewRound(ws, state);
       case 'respond_new_round':   return handleRespondNewRound(ws, state, msg);
       default:                    return send(ws, { type: 'echo', payload: msg });
