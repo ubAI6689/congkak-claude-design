@@ -109,6 +109,46 @@
   /* Chess-style per-seat view: seat 1 in online mode sees their holes at the
      bottom by swapping which row/rumah/panel renders in each slot — no CSS
      transforms, so hand positioning via getBoundingClientRect stays correct. */
+  /* Persistent "opponent is choosing…" banner shown over their row in MP
+     when they're active but not yet animating. */
+  .opponent-thinking {
+    position: absolute;
+    top: 18%;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 9px 20px;
+    background: oklch(0.22 0.02 50 / 0.88);
+    color: var(--cream);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 14px oklch(0.15 0.04 40 / 0.4);
+    z-index: 10;
+    pointer-events: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    animation: oppThinkingPulse 1.6s ease-in-out infinite;
+  }
+  .opponent-thinking::before {
+    content: "";
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: var(--gold);
+    animation: oppThinkingDot 1s ease-in-out infinite;
+  }
+  @keyframes oppThinkingPulse {
+    0%, 100% { opacity: 0.78; }
+    50%      { opacity: 1; }
+  }
+  @keyframes oppThinkingDot {
+    0%, 100% { transform: scale(1); box-shadow: 0 0 0 0 oklch(0.78 0.12 85 / 0.6); }
+    50%      { transform: scale(1.2); box-shadow: 0 0 0 6px oklch(0.78 0.12 85 / 0); }
+  }
   .player-panel .you-badge {
     display: inline-block;
     margin-left: 6px;
@@ -1722,6 +1762,15 @@ function App() {
               </div>
             );
           })}
+          {/* "Opponent is choosing…" banner — shown in MP when opponent is
+              eligible to move but hasn't started sowing (no hand animating). */}
+          {netMode === 'online' && netRoom && !winner && (() => {
+            const opp = 1 - netRoom.seat;
+            const oppActive = playerActive(opp);
+            const oppAnimating = !!hands[opp];
+            if (!oppActive || oppAnimating) return null;
+            return <div className="opponent-thinking">Opponent is choosing a hole</div>;
+          })()}
           {flyingSeeds.map(s => (
             <div
               key={s.id}
