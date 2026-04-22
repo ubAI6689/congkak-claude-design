@@ -1319,6 +1319,9 @@ function App() {
 
   function canPlayerAct(p) {
     if (winner != null) return false;
+    // Online mode: only your own seat can act. Blocks ghost cursor rendering
+    // and keyboard routing to opponent's row.
+    if (netMode === 'online' && netRoom && netRoom.seat !== p) return false;
     if (phaseRef.current === 'opener-sim') {
       if (openerDoneRef.current[p]) return false;
       if (hands[p]) return false;
