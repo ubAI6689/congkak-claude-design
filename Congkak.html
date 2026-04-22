@@ -623,6 +623,49 @@
   .hand.ghost.flipped {
     animation: ghostHoverFlipped 1.6s ease-in-out infinite;
   }
+  /* MP opener-sim: locked "committed" visual on the committed hole — golden pulse + ✓ badge */
+  .hand.ghost.committed {
+    opacity: 1;
+    filter: drop-shadow(0 0 12px oklch(0.78 0.12 85 / 0.7)) drop-shadow(0 4px 6px oklch(0.15 0.04 40 / 0.35));
+    animation: committedPulse 1.2s ease-in-out infinite;
+  }
+  .hand.ghost.committed.flipped {
+    animation: committedPulseFlipped 1.2s ease-in-out infinite;
+  }
+  @keyframes committedPulse {
+    0%, 100% { transform: translate(-50%, -14%) scale(1); }
+    50%      { transform: translate(-50%, -14%) scale(1.08); }
+  }
+  @keyframes committedPulseFlipped {
+    0%, 100% { transform: translate(-50%, -14%) rotate(180deg) scale(1); }
+    50%      { transform: translate(-50%, -14%) rotate(180deg) scale(1.08); }
+  }
+  .hand.ghost.committed::after {
+    content: "✓";
+    position: absolute;
+    top: -8px; right: -8px;
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    background: var(--gold);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 13px;
+    font-weight: 700;
+    display: grid; place-items: center;
+    box-shadow: 0 2px 6px oklch(0.15 0.04 40 / 0.4);
+  }
+  .hand.ghost.committed.flipped::after {
+    transform: rotate(180deg);
+  }
+  /* Bump animation — applied during opener_round when two hands collide */
+  .hand.bump {
+    animation: handBump 0.22s cubic-bezier(.36,.07,.19,.97) both;
+  }
+  @keyframes handBump {
+    0%, 100% { translate: 0 0; }
+    25%      { translate: -6px 2px; }
+    75%      { translate: 6px 2px; }
+  }
   @keyframes ghostHover {
     0%, 100% { transform: translate(-50%, -14%) scale(1); }
     50%      { transform: translate(-50%, -22%) scale(1.02); }
@@ -1231,6 +1274,9 @@ function App() {
   const [netError, setNetError] = useState(null);
   // Rematch state: { requesterSeat } while a new-round request is in flight.
   const [netRematch, setNetRematch] = useState(null);
+  // MP opener-sim: per-player committed pick for the current lockstep round.
+  // Mirrors the server's state; updated on opener_picks_update broadcasts.
+  const [netOpenerPicks, setNetOpenerPicks] = useState([null, null]);
   const netWsRef = useRef(null);
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
@@ -1554,6 +1600,7 @@ function App() {
       if (msg.type === 'room_joined') {
         setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
         setNetMode('online');
+        setNetOpenerPicks([null, null]);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         // Snap to authoritative server state
         if (msg.gameState) {
@@ -1581,6 +1628,16 @@ function App() {
         animateOnlineEvents(msg.events, msg.move.player, msg.state);
       } else if (msg.type === 'move_rejected') {
         setLastAction('move rejected: ' + msg.reason);
+      } else if (msg.type === 'opener_picks_update') {
+        setNetOpenerPicks(msg.picks.slice());
+      } else if (msg.type === 'opener_round_applied') {
+        // Atomic round: both (or solo) animations play together from one
+        // reducer-computed event list. Track as latest for the race-safe snap.
+        if (msg.seq > latestMoveRef.current.seq) {
+          latestMoveRef.current = { seq: msg.seq, finalState: msg.state };
+        }
+        setNetOpenerPicks([null, null]);
+        animateOpenerRoundEvents(msg.events, msg.state);
       } else if (msg.type === 'new_round_requested') {
         setNetRematch({ requesterSeat: msg.by });
       } else if (msg.type === 'new_round_declined') {
@@ -1590,6 +1647,7 @@ function App() {
         // Abort any in-flight animators and snap to the fresh game state.
         abortRef.current += 1;
         setNetRematch(null);
+        setNetOpenerPicks([null, null]);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         const g = msg.gameState;
         if (g) {
@@ -1799,10 +1857,14 @@ function App() {
               )}
             </div>
           ))}
-          {/* Ghost cursor hands — shown over each player's selected hole when they can act */}
+          {/* Ghost cursor hands — shown over each player's selected hole when they can act.
+              In MP opener-sim, if a player has COMMITTED a pick (netOpenerPicks[p]), the
+              ghost locks onto that hole with the .committed visual until the round fires. */}
           {[0, 1].map(p => {
-            if (!canPlayerAct(p)) return null;
-            const idx = cursorHole[p];
+            const committedIdx = (netMode === 'online' && phase === 'opener-sim') ? netOpenerPicks[p] : null;
+            const isCommitted = committedIdx != null;
+            if (!isCommitted && !canPlayerAct(p)) return null;
+            const idx = isCommitted ? committedIdx : cursorHole[p];
             if (idx == null) return null;
             if (hands[p] || (p === currentPlayer && hand)) return null; // don't double-render during sowing
             const pos = positionFor({type: 'hole', idx});
@@ -1810,7 +1872,7 @@ function App() {
             return (
               <div
                 key={"ghost-" + p}
-                className={"hand ghost" + (handFlipped(p) ? " flipped" : "")}
+                className={"hand ghost" + (handFlipped(p) ? " flipped" : "") + (isCommitted ? " committed" : "")}
                 style={{ left: pos.x + 'px', top: pos.y - 40 + 'px' }}>
                 <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                   <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
@@ -1824,9 +1886,10 @@ function App() {
           {netMode === 'online' && netRoom && !winner && (() => {
             const opp = 1 - netRoom.seat;
             const oppActive = playerActive(opp);
-            // Suppress banner while opponent's animator is running (covers the
-            // tikam gap where their hand is briefly null mid-move).
             if (!oppActive || hands[opp] || mpAnimating[opp]) return null;
+            // In opener-sim lockstep, suppress when opponent has already committed
+            // — the committed ghost overlay already communicates that.
+            if (phase === 'opener-sim' && netOpenerPicks[opp] != null) return null;
             return <div className="opponent-thinking">Opponent is choosing a hole</div>;
           })()}
           {flyingSeeds.map(s => (
@@ -2219,12 +2282,18 @@ function App() {
 
   // ===== Move handler (safe against rapid clicks) =====
   function playMoveSafe(startHole) {
-    // Online mode: send to server, don't run local reducer. Server broadcasts
-    // move_applied which the WS handler plays via animator.
+    // Online mode: dispatch based on phase. Opener-sim uses lockstep commit
+    // rounds (commit_opener_pick → server fires opener_round_applied when
+    // all non-done players have committed). Alternating uses direct play_move.
     if (netMode === 'online' && netRoom) {
       const p = isOwnSide(startHole, 0) ? 0 : 1;
-      if (p !== netRoom.seat) return; // can only move for your own seat
-      netSend({ type: 'play_move', move: { player: p, hole: startHole } });
+      if (p !== netRoom.seat) return;
+      if (phaseRef.current === 'opener-sim') {
+        if (netOpenerPicks[p] != null) return; // already committed; ignore
+        netSend({ type: 'commit_opener_pick', player: p, hole: startHole });
+      } else {
+        netSend({ type: 'play_move', move: { player: p, hole: startHole } });
+      }
       return;
     }
     if (phaseRef.current === 'opener-sim') {
@@ -2232,6 +2301,163 @@ function App() {
       playMoveParallel(p, startHole);
     } else {
       playMoveV2(startHole);
+    }
+  }
+
+  // ===== MP opener-sim: concurrent two-hand animator =====
+  // Given the event list from `opener_round` (interleaved events for both
+  // players, possibly with bumps), split by player and run two streams in
+  // parallel via Promise.all. They share boardRef so seed drops render in
+  // the reducer-intended order.
+  async function animateOpenerRoundEvents(events, finalState) {
+    const byPlayer = { 0: [], 1: [] };
+    for (const ev of events) if (ev.player != null) byPlayer[ev.player].push(ev);
+
+    const activePlayers = [0, 1].filter(p => byPlayer[p].length > 0);
+    for (const p of activePlayers) {
+      mpAnimatingRef.current[p] = true;
+    }
+    setMpAnimating(prev => {
+      const next = { ...prev };
+      for (const p of activePlayers) next[p] = true;
+      return next;
+    });
+
+    try { getCtx(); } catch (e) {}
+
+    await Promise.all(activePlayers.map(p => animatePlayerStream(p, byPlayer[p])));
+
+    // After both streams complete, commit authoritative state (race-safe).
+    for (const p of activePlayers) mpAnimatingRef.current[p] = false;
+    const snap = (latestMoveRef.current.finalState) || finalState;
+    setBoard({ holes: snap.holes.slice(), rumah: snap.rumah.slice() });
+    boardRef.current = { holes: snap.holes.slice(), rumah: snap.rumah.slice() };
+    openerDoneRef.current = { 0: snap.openerDone[0], 1: snap.openerDone[1] };
+    if (snap.phase !== phaseRef.current) {
+      setPhase(snap.phase);
+      phaseRef.current = snap.phase;
+      if (snap.phase === 'alternating') announceText('turn-based play begins', 1200);
+    }
+    setCurrentPlayer(snap.turn);
+    setActiveHole(null);
+    for (const p of activePlayers) {
+      setTimeout(() => setHands(prev => ({ ...prev, [p]: null })), 280);
+    }
+    setTimeout(() => setMpAnimating(prev => {
+      const next = { ...prev };
+      for (const p of activePlayers) next[p] = false;
+      return next;
+    }), 300);
+    if (snap.winner) {
+      setWinner(snap.winner);
+      if (snap.winner.player >= 0) { sfxWin(); burstConfetti(); }
+    }
+  }
+
+  async function animatePlayerStream(player, events) {
+    const b = boardRef.current;
+    const PICKUP_MS = 260;
+    const MOVE_MS = 220;
+    const SETTLE_MS = 40;
+    const DROP_AFTER_MS = 90;
+    const BUMP_MS = 220;
+    const CHAIN_WAIT_MS = 220;
+
+    const myToken = abortRef.current;
+    const aborted = () => abortRef.current !== myToken;
+
+    const setMyHand = (updater) => {
+      setHands(prev => {
+        const cur = prev[player];
+        const next = typeof updater === 'function' ? updater(cur) : updater;
+        return { ...prev, [player]: next };
+      });
+    };
+
+    let prevWasDrop = false;
+    for (const ev of events) {
+      if (aborted()) return;
+
+      if (ev.kind === 'pickup') {
+        if (prevWasDrop) { await sleep(CHAIN_WAIT_MS); if (aborted()) return; }
+        b.holes[ev.hole] = 0;
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        const pos = positionFor({ type: 'hole', idx: ev.hole });
+        if (pos) setMyHand({ x: pos.x, y: pos.y - 40, carrying: ev.count, player });
+        await sleep(PICKUP_MS);
+        prevWasDrop = false;
+      } else if (ev.kind === 'drop') {
+        const pos = positionFor(ev.at);
+        if (pos) setMyHand(h => h ? { ...h, x: pos.x, y: pos.y - 40 } : h);
+        await sleep(MOVE_MS + SETTLE_MS);
+        if (aborted()) return;
+        if (ev.at.type === 'hole') b.holes[ev.at.idx] += 1;
+        else b.rumah[ev.at.p] += 1;
+        setMyHand(h => h ? { ...h, carrying: h.carrying != null ? h.carrying - 1 : h.carrying } : h);
+        setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        sfxDrop();
+        await sleep(DROP_AFTER_MS);
+        prevWasDrop = true;
+      } else if (ev.kind === 'bump') {
+        setMyHand(h => h ? { ...h, bump: true } : h);
+        sfxBump();
+        await sleep(BUMP_MS);
+        if (aborted()) return;
+        setMyHand(h => h ? { ...h, bump: false } : h);
+        prevWasDrop = false;
+      } else if (ev.kind === 'anotherTurn') {
+        sfxRumah();
+        announceText((player === 0 ? 'Player 1' : 'Player 2') + ' again!', 1100);
+        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' landed in their rumah — another move.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'tikam') {
+        setMyHand(null);
+        setCaptureFlashes(prev => new Set([...prev, ev.landedHole, ev.oppHole]));
+        setBoardShake(true);
+        sfxCapture();
+        announceText((player === 0 ? 'Player 1' : 'Player 2') + ' tikam!', 1400);
+        await sleep(650);
+        if (aborted()) return;
+        const oppPos = positionFor({ type: 'hole', idx: ev.oppHole });
+        const landPos = positionFor({ type: 'hole', idx: ev.landedHole });
+        const rumahPos = positionFor({ type: 'rumah', p: player });
+        if (oppPos && landPos && rumahPos) {
+          const fliers = [];
+          const baseId = Date.now() + '-' + player;
+          const jitter = () => (Math.random() - 0.5) * 24;
+          for (let k = 0; k < ev.oppCount; k++) fliers.push({ id: baseId+'-o-'+k, fromX: oppPos.x+jitter(), fromY: oppPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: k*55 });
+          for (let k = 0; k < ev.landCount; k++) fliers.push({ id: baseId+'-l-'+k, fromX: landPos.x+jitter(), fromY: landPos.y+jitter(), toX: rumahPos.x+jitter(), toY: rumahPos.y+jitter(), delay: 200+k*55 });
+          setFlyingSeeds(prev => [...prev, ...fliers]);
+          b.holes[ev.oppHole] = 0; b.holes[ev.landedHole] = 0;
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          const totalDuration = 200 + Math.max(ev.oppCount, ev.landCount) * 55 + 900;
+          await sleep(totalDuration - 200);
+          if (aborted()) return;
+          b.rumah[player] += ev.loot;
+          setRumahFlash(prev => new Set([...prev, player]));
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+          await sleep(250);
+          setFlyingSeeds([]);
+        } else {
+          b.holes[ev.oppHole] = 0; b.holes[ev.landedHole] = 0; b.rumah[player] += ev.loot;
+          setBoard({ holes: [...b.holes], rumah: [...b.rumah] });
+        }
+        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' tikam — captured ' + ev.loot + ' seeds.');
+        await sleep(450);
+        setCaptureFlashes(new Set());
+        setBoardShake(false);
+        setRumahFlash(new Set());
+        prevWasDrop = false;
+      } else if (ev.kind === 'noCapture') {
+        const who = player === 0 ? 'Player One' : 'Player Two';
+        setLastAction(ev.reason === 'notPassedRumah'
+          ? who + ' landed empty — but hadn’t passed their rumah yet. No tikam.'
+          : who + ' landed empty — nothing across.');
+        prevWasDrop = false;
+      } else if (ev.kind === 'mati') {
+        setLastAction((player === 0 ? 'Player One' : 'Player Two') + ' died in enemy territory. Turn ends.');
+        prevWasDrop = false;
+      }
     }
   }
 

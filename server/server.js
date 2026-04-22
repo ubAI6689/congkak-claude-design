@@ -101,6 +101,7 @@ function handleCreateRoom(ws, state) {
     gameState: freshGameState(),
     seq: 0,
     pendingNewRoundBy: null,  // null | 0 | 1 — seat that has requested a rematch
+    openerPicks: [null, null], // lockstep: per-player committed pick for current opener round
     createdAt: Date.now(),
     lastActivity: Date.now(),
   };
@@ -196,6 +197,7 @@ function applyNewRound(room) {
   room.gameState = freshGameState();
   room.seq += 1;
   room.pendingNewRoundBy = null;
+  room.openerPicks = [null, null];
   room.lastActivity = Date.now();
   broadcastRoom(room, {
     type: 'new_round_applied',
@@ -209,13 +211,11 @@ function handlePlayMove(ws, state, msg) {
   const room = state.roomCode && rooms.get(state.roomCode);
   if (!room) return send(ws, { type: 'move_rejected', reason: 'not-in-room' });
   if (state.seat !== msg.move?.player) return send(ws, { type: 'move_rejected', reason: 'seat-mismatch' });
-  // Dispatch based on current phase
-  let action;
+  // MP opener-sim uses commit_opener_pick (lockstep rounds), not play_move.
   if (room.gameState.phase === 'opener-sim') {
-    action = { type: 'opener_solo', player: msg.move.player, hole: msg.move.hole };
-  } else {
-    action = { type: 'play_move', player: msg.move.player, hole: msg.move.hole };
+    return send(ws, { type: 'move_rejected', reason: 'use-commit-opener-pick' });
   }
+  const action = { type: 'play_move', player: msg.move.player, hole: msg.move.hole };
   const result = engine.reducer(room.gameState, action);
   if (result.events.length === 1 && result.events[0].kind === 'invalid') {
     return send(ws, { type: 'move_rejected', reason: result.events[0].reason, seq: room.seq });
@@ -223,15 +223,76 @@ function handlePlayMove(ws, state, msg) {
   room.gameState = result.state;
   room.seq += 1;
   room.lastActivity = Date.now();
-  const payload = {
+  broadcastRoom(room, {
     type: 'move_applied',
     seq: room.seq,
     move: msg.move,
     events: result.events,
     state: result.state,
-  };
-  broadcastRoom(room, payload);
+  });
   log(`room ${room.code} move: seat=${msg.move.player} hole=${msg.move.hole} seq=${room.seq}`);
+}
+
+function handleCommitOpenerPick(ws, state, msg) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return;
+  if (room.gameState.phase !== 'opener-sim') return send(ws, { type: 'move_rejected', reason: 'not-opener-phase' });
+  const seat = state.seat;
+  if (seat !== msg.player) return send(ws, { type: 'move_rejected', reason: 'seat-mismatch' });
+  if (room.gameState.openerDone[seat]) return send(ws, { type: 'move_rejected', reason: 'already-done' });
+  const hole = msg.hole;
+  // Validate hole
+  if (hole < 0 || hole > 13) return send(ws, { type: 'move_rejected', reason: 'bad-hole' });
+  const isP0side = hole >= 0 && hole <= 6;
+  if ((seat === 0) !== isP0side) return send(ws, { type: 'move_rejected', reason: 'not-own-side' });
+  if (room.gameState.holes[hole] === 0) return send(ws, { type: 'move_rejected', reason: 'empty-hole' });
+
+  room.openerPicks[seat] = hole;
+  room.lastActivity = Date.now();
+  broadcastRoom(room, { type: 'opener_picks_update', picks: room.openerPicks.slice() });
+
+  // Check if all non-done players have committed
+  const need = [0, 1].filter(p => !room.gameState.openerDone[p]);
+  const allReady = need.every(p => room.openerPicks[p] != null);
+  if (!allReady) return;
+
+  // Fire the round
+  const picks = [
+    room.gameState.openerDone[0] ? null : room.openerPicks[0],
+    room.gameState.openerDone[1] ? null : room.openerPicks[1],
+  ];
+  const result = engine.reducer(room.gameState, { type: 'opener_round', picks });
+  if (result.events.length === 1 && result.events[0].kind === 'invalid') {
+    // Reset picks and tell both sides — shouldn't normally happen
+    room.openerPicks = [null, null];
+    broadcastRoom(room, { type: 'move_rejected', reason: result.events[0].reason });
+    broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
+    return;
+  }
+  room.gameState = result.state;
+  room.seq += 1;
+  room.openerPicks = [null, null];
+  room.lastActivity = Date.now();
+  broadcastRoom(room, {
+    type: 'opener_round_applied',
+    seq: room.seq,
+    picks,
+    events: result.events,
+    state: result.state,
+  });
+  broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
+  log(`room ${room.code} opener_round applied seq=${room.seq} picks=${JSON.stringify(picks)} done=${JSON.stringify(result.state.openerDone)} phase=${result.state.phase}`);
+}
+
+function handleUncommitOpenerPick(ws, state) {
+  const room = state.roomCode && rooms.get(state.roomCode);
+  if (!room) return;
+  if (room.gameState.phase !== 'opener-sim') return;
+  const seat = state.seat;
+  if (seat == null) return;
+  if (room.openerPicks[seat] == null) return;
+  room.openerPicks[seat] = null;
+  broadcastRoom(room, { type: 'opener_picks_update', picks: room.openerPicks.slice() });
 }
 
 function handleLeaveRoom(ws, state) {
@@ -314,10 +375,12 @@ wss.on('connection', (ws, req) => {
       case 'join_room':    return handleJoinRoom(ws, state, msg);
       case 'rejoin_room':  return handleRejoinRoom(ws, state, msg);
       case 'leave_room':   return handleLeaveRoom(ws, state);
-      case 'play_move':         return handlePlayMove(ws, state, msg);
-      case 'request_new_round': return handleRequestNewRound(ws, state);
-      case 'respond_new_round': return handleRespondNewRound(ws, state, msg);
-      default:                  return send(ws, { type: 'echo', payload: msg });
+      case 'play_move':           return handlePlayMove(ws, state, msg);
+      case 'commit_opener_pick':  return handleCommitOpenerPick(ws, state, msg);
+      case 'uncommit_opener_pick':return handleUncommitOpenerPick(ws, state);
+      case 'request_new_round':   return handleRequestNewRound(ws, state);
+      case 'respond_new_round':   return handleRespondNewRound(ws, state, msg);
+      default:                    return send(ws, { type: 'echo', payload: msg });
     }
   });
 
