@@ -106,6 +106,23 @@
     place-items: center;
     padding: 8px 24px;
   }
+  /* Chess-style per-seat view: seat 1 in online mode sees their holes at the
+     bottom by swapping which row/rumah/panel renders in each slot — no CSS
+     transforms, so hand positioning via getBoundingClientRect stays correct. */
+  .player-panel .you-badge {
+    display: inline-block;
+    margin-left: 6px;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: var(--gold);
+    color: var(--ink);
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    vertical-align: middle;
+  }
 
   /* === BOARD === */
   .board-wrap {
@@ -1567,24 +1584,34 @@ function App() {
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   // ========== RENDER ==========
-  // Bottom row: index 0 = rightmost, 6 = leftmost (nearest P0 rumah on left). Render L->R -> [6..0]
-  const bottomRange = [6,5,4,3,2,1,0];
-  // Top row: index 7 = leftmost (nearest P0 rumah), 13 = rightmost. Render L->R -> [7..13]
-  const topRange = [7,8,9,10,11,12,13];
+  // Chess-style per-seat view: seat 1 in online mode sees their holes (7-13) at
+  // the bottom and opponent's (0-6) at top. Rumahs and player panels swap too.
+  const viewFlipped = netMode === 'online' && netRoom && netRoom.seat === 1;
+  // Bottom row renders screen-L→R from the viewer's POV.
+  // Seat 0 view: bottom = P0 holes [6,5,4,3,2,1,0]; top = P1 holes [7,8,9,10,11,12,13]
+  // Seat 1 view: bottom = P1 holes [7,8,9,10,11,12,13]; top = P0 holes [0,1,2,3,4,5,6]
+  const bottomRange = viewFlipped ? [7,8,9,10,11,12,13] : [6,5,4,3,2,1,0];
+  const topRange    = viewFlipped ? [0,1,2,3,4,5,6]    : [7,8,9,10,11,12,13];
+  // Rumahs and player panels swap too so YOUR rumah is on your left.
+  const leftRumahPlayer  = viewFlipped ? 1 : 0;
+  const rightRumahPlayer = viewFlipped ? 0 : 1;
+  const topPanelPlayer    = viewFlipped ? 0 : 1;  // "top" panel (rotated text) renders opponent
+  const bottomPanelPlayer = viewFlipped ? 1 : 0;  // "bottom" panel renders self
 
   // In simultaneous-opener phase, both sides are playable independently (as long as that player isn't already sowing)
   const inOpener = phase === 'opener-sim';
   // Online mode: you can only click holes on YOUR seat's side.
   const onlineSeatLock = (p) => netMode === 'online' && netRoom && netRoom.seat !== p;
-  const canBottomPlay = inOpener
-    ? (!hands[0] && !winner && !openerDoneRef.current[0] && !onlineSeatLock(0))
-    : (currentPlayer === 0 && !isAnimating && !winner && !onlineSeatLock(0));
-  const canTopPlay = inOpener
-    ? (!hands[1] && !winner && !openerDoneRef.current[1] && !onlineSeatLock(1))
-    : (currentPlayer === 1 && !isAnimating && !winner && !onlineSeatLock(1));
+  const canPlayAsPlayer = (p) => inOpener
+    ? (!hands[p] && !winner && !openerDoneRef.current[p] && !onlineSeatLock(p))
+    : (currentPlayer === p && !isAnimating && !winner && !onlineSeatLock(p));
+  // The "bottom" CSS slot renders whichever player sits at the bottom of THIS viewer's POV.
+  const canBottomPlay = canPlayAsPlayer(bottomPanelPlayer);
+  const canTopPlay    = canPlayAsPlayer(topPanelPlayer);
 
-  const p0Active = inOpener ? !winner : (currentPlayer === 0 && !winner);
-  const p1Active = inOpener ? !winner : (currentPlayer === 1 && !winner);
+  const playerActive = (p) => inOpener ? !winner : (currentPlayer === p && !winner);
+  const p0Active = playerActive(0);
+  const p1Active = playerActive(1);
 
   // Seed style palettes
   const SEED_PALETTES = {
@@ -1692,42 +1719,60 @@ function App() {
               }}
             />
           ))}
-          {/* Top player panel (rotated) */}
-          <div className={"player-panel top" + (p1Active ? " active" : "")}>
-            <div className="avatar">II</div>
-            <div className="player-meta">
-              <span className="player-name">Player Two</span>
-              <span className="player-status">
-                {winner && winner.player === 1 ? 'Victor' : winner && winner.player === 0 ? 'Defeated' : winner ? 'Draw' : p1Active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
-              </span>
-            </div>
-            <div className="player-score">{board.rumah[1]}</div>
-          </div>
+          {/* Top player panel (rotated) — opponent from this viewer's POV */}
+          {(() => {
+            const p = topPanelPlayer;
+            const isYou = netMode === 'online' && netRoom && netRoom.seat === p;
+            const active = playerActive(p);
+            const name = p === 0 ? 'Player One' : 'Player Two';
+            const avatar = p === 0 ? 'I' : 'II';
+            return (
+              <div className={"player-panel top" + (active ? " active" : "")}>
+                <div className="avatar">{avatar}</div>
+                <div className="player-meta">
+                  <span className="player-name">{name}{isYou && <span className="you-badge">you</span>}</span>
+                  <span className="player-status">
+                    {winner && winner.player === p ? 'Victor' : winner && winner.player === (1-p) ? 'Defeated' : winner ? 'Draw' : active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
+                  </span>
+                </div>
+                <div className="player-score">{board.rumah[p]}</div>
+              </div>
+            );
+          })()}
 
-          {/* Bottom player panel */}
-          <div className={"player-panel bottom" + (p0Active ? " active" : "")}>
-            <div className="avatar">I</div>
-            <div className="player-meta">
-              <span className="player-name">Player One</span>
-              <span className="player-status">
-                {winner && winner.player === 0 ? 'Victor' : winner && winner.player === 1 ? 'Defeated' : winner ? 'Draw' : p0Active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
-              </span>
-            </div>
-            <div className="player-score">{board.rumah[0]}</div>
-          </div>
+          {/* Bottom player panel — self from this viewer's POV */}
+          {(() => {
+            const p = bottomPanelPlayer;
+            const isYou = netMode === 'online' && netRoom && netRoom.seat === p;
+            const active = playerActive(p);
+            const name = p === 0 ? 'Player One' : 'Player Two';
+            const avatar = p === 0 ? 'I' : 'II';
+            return (
+              <div className={"player-panel bottom" + (active ? " active" : "")}>
+                <div className="avatar">{avatar}</div>
+                <div className="player-meta">
+                  <span className="player-name">{name}{isYou && <span className="you-badge">you</span>}</span>
+                  <span className="player-status">
+                    {winner && winner.player === p ? 'Victor' : winner && winner.player === (1-p) ? 'Defeated' : winner ? 'Draw' : active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
+                  </span>
+                </div>
+                <div className="player-score">{board.rumah[p]}</div>
+              </div>
+            );
+          })()}
 
           <div className="board">
-            <span className="side-label left">rumah &middot; i</span>
-            <span className="side-label right">rumah &middot; ii</span>
+            <span className="side-label left">rumah &middot; {leftRumahPlayer === 0 ? 'i' : 'ii'}</span>
+            <span className="side-label right">rumah &middot; {rightRumahPlayer === 0 ? 'i' : 'ii'}</span>
 
             <div className="grid">
               <div className="rumah-slot">
                 <Rumah
-                  player={0}
-                  count={board.rumah[0]}
-                  mine={currentPlayer === 0}
-                  win={winner && winner.player === 0}
-                  captureFlash={rumahFlash.has(0)}
+                  player={leftRumahPlayer}
+                  count={board.rumah[leftRumahPlayer]}
+                  mine={currentPlayer === leftRumahPlayer}
+                  win={winner && winner.player === leftRumahPlayer}
+                  captureFlash={rumahFlash.has(leftRumahPlayer)}
                   animKey={animKey}
                 />
               </div>
@@ -1761,11 +1806,11 @@ function App() {
 
               <div className="rumah-slot">
                 <Rumah
-                  player={1}
-                  count={board.rumah[1]}
-                  mine={currentPlayer === 1}
-                  win={winner && winner.player === 1}
-                  captureFlash={rumahFlash.has(1)}
+                  player={rightRumahPlayer}
+                  count={board.rumah[rightRumahPlayer]}
+                  mine={currentPlayer === rightRumahPlayer}
+                  win={winner && winner.player === rightRumahPlayer}
+                  captureFlash={rumahFlash.has(rightRumahPlayer)}
                   animKey={animKey}
                 />
               </div>
