@@ -1623,7 +1623,11 @@ function App() {
   const canBottomPlay = canPlayAsPlayer(bottomPanelPlayer);
   const canTopPlay    = canPlayAsPlayer(topPanelPlayer);
 
-  const playerActive = (p) => inOpener ? !winner : (currentPlayer === p && !winner);
+  const playerActive = (p) => {
+    if (winner) return false;
+    if (inOpener) return !openerDoneRef.current[p];
+    return currentPlayer === p;
+  };
   const p0Active = playerActive(0);
   const p1Active = playerActive(1);
 
@@ -1737,16 +1741,22 @@ function App() {
           {(() => {
             const p = topPanelPlayer;
             const isYou = netMode === 'online' && netRoom && netRoom.seat === p;
+            const isOpponent = netMode === 'online' && netRoom && netRoom.seat !== p;
             const active = playerActive(p);
             const name = p === 0 ? 'Player One' : 'Player Two';
             const avatar = p === 0 ? 'I' : 'II';
+            const pulse = <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/>;
             return (
               <div className={"player-panel top" + (active ? " active" : "")}>
                 <div className="avatar">{avatar}</div>
                 <div className="player-meta">
                   <span className="player-name">{name}{isYou && <span className="you-badge">you</span>}</span>
                   <span className="player-status">
-                    {winner && winner.player === p ? 'Victor' : winner && winner.player === (1-p) ? 'Defeated' : winner ? 'Draw' : active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
+                    {winner && winner.player === p ? 'Victor'
+                      : winner && winner.player === (1-p) ? 'Defeated'
+                      : winner ? 'Draw'
+                      : active ? (isOpponent ? <>choosing… {pulse}</> : <>your turn {pulse}</>)
+                      : 'waiting'}
                   </span>
                 </div>
                 <div className="player-score">{board.rumah[p]}</div>
@@ -1758,16 +1768,22 @@ function App() {
           {(() => {
             const p = bottomPanelPlayer;
             const isYou = netMode === 'online' && netRoom && netRoom.seat === p;
+            const isOpponent = netMode === 'online' && netRoom && netRoom.seat !== p;
             const active = playerActive(p);
             const name = p === 0 ? 'Player One' : 'Player Two';
             const avatar = p === 0 ? 'I' : 'II';
+            const pulse = <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/>;
             return (
               <div className={"player-panel bottom" + (active ? " active" : "")}>
                 <div className="avatar">{avatar}</div>
                 <div className="player-meta">
                   <span className="player-name">{name}{isYou && <span className="you-badge">you</span>}</span>
                   <span className="player-status">
-                    {winner && winner.player === p ? 'Victor' : winner && winner.player === (1-p) ? 'Defeated' : winner ? 'Draw' : active ? <>your turn <span className="turn-dot" style={{display:'inline-block',marginLeft:6,verticalAlign:'middle'}}/></> : 'waiting'}
+                    {winner && winner.player === p ? 'Victor'
+                      : winner && winner.player === (1-p) ? 'Defeated'
+                      : winner ? 'Draw'
+                      : active ? (isOpponent ? <>choosing… {pulse}</> : <>your turn {pulse}</>)
+                      : 'waiting'}
                   </span>
                 </div>
                 <div className="player-score">{board.rumah[p]}</div>
