@@ -409,7 +409,8 @@
         // Terminal analysis if this was the last drop in hand
         if (hands[s].carrying === 0) {
           analyzeEndOfSow(b, hands[s], events);
-          // If result was a chain, hand continues with a new pickup/path (not done)
+          // Record the tick at which this hand terminated (not set for chain continuations)
+          if (hands[s].done && hands[s].doneTick == null) hands[s].doneTick = tick;
         }
       }
     }
@@ -436,29 +437,41 @@
     } else if (newOpenerDone[0] && newOpenerDone[1]) {
       // Both players finished opener → need to decide who goes first in alternating.
       var bothActiveThisRound = picks[0] != null && picks[1] != null;
-      if (bothActiveThisRound) {
-        // Both ended THIS same round — block the transition and wait for
-        // server to resolve a tiebreaker (RPS). Phase stays 'opener-sim' but
-        // no more picks are accepted while awaitingTiebreaker is true.
+      // Tick-simultaneous = both hands terminated on the exact same tick.
+      // Differing ticks = one finished before the other; earlier one was
+      // "waiting" while the other kept chaining, so they get first turn.
+      var tickSimultaneous = bothActiveThisRound
+        && hands[0] && hands[1]
+        && hands[0].doneTick != null && hands[1].doneTick != null
+        && hands[0].doneTick === hands[1].doneTick;
+      if (tickSimultaneous) {
         events.push({ kind: 'tiebreakerNeeded' });
-        var stateWithTiebreaker = {
-          holes: b.holes,
-          rumah: b.rumah,
-          turn: state.turn,
-          phase: state.phase,
-          openerDone: newOpenerDone,
-          awaitingTiebreaker: true,
-          seedsPerHole: state.seedsPerHole,
-          winner: null,
-          seq: state.seq + 1,
+        return {
+          state: {
+            holes: b.holes,
+            rumah: b.rumah,
+            turn: state.turn,
+            phase: state.phase,
+            openerDone: newOpenerDone,
+            awaitingTiebreaker: true,
+            seedsPerHole: state.seedsPerHole,
+            winner: null,
+            seq: state.seq + 1,
+          },
+          events: events,
         };
-        return { state: stateWithTiebreaker, events: events };
       }
-      // Single-active this round: the OTHER player (who finished earlier, was
-      // waiting) takes the first alternating turn. Compensates for the wait.
+      // Either single-active, or different done-ticks — earlier finisher
+      // (the waiter) takes the first alternating turn.
       newPhase = 'alternating';
-      if (picks[0] != null) newTurn = playerHasMoves(b, 1) ? 1 : 0;
-      else                  newTurn = playerHasMoves(b, 0) ? 0 : 1;
+      if (bothActiveThisRound) {
+        var earlier = hands[0].doneTick < hands[1].doneTick ? 0 : 1;
+        newTurn = playerHasMoves(b, earlier) ? earlier : (1 - earlier);
+      } else if (picks[0] != null) {
+        newTurn = playerHasMoves(b, 1) ? 1 : 0;
+      } else {
+        newTurn = playerHasMoves(b, 0) ? 0 : 1;
+      }
       events.push({ kind: 'phaseChange', from: 'opener-sim', to: 'alternating' });
       events.push({ kind: 'turnEnd', nextPlayer: newTurn });
     } else {

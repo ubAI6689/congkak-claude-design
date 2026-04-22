@@ -373,6 +373,20 @@ run('resolve_tiebreaker → transitions to alternating with winner turn', () => 
   assertTrue(out.events.some(e => e.kind === 'phaseChange'));
 });
 
+run('different done-ticks → earlier finisher takes first turn, no tiebreaker', () => {
+  // P0: hole 0 with 2 seeds → sows 1, 2. Last=hole 2, noCapture-notPassed.
+  //     P0's sowing is 2 drops long; done at tick index 1.
+  // P1: hole 7 with 3 seeds → sows 8, 9, 10. Last=hole 10, noCapture-notPassed.
+  //     P1's sowing is 3 drops long; done at tick index 2.
+  // Different done-ticks → P0 finished earlier → P0 gets first turn. No RPS.
+  const s = mkOpenerState({ holes: [2,0,0,0,0,0,0, 3,0,0,0,0,0,0], openerDone: [false, false] });
+  const out = E.reducer(s, { type: 'opener_round', picks: [0, 7] });
+  assertEq(out.state.openerDone, [true, true]);
+  assertEq(out.state.awaitingTiebreaker, false, 'no tiebreaker when tick-diff');
+  assertEq(out.state.phase, 'alternating');
+  assertEq(out.state.turn, 0, 'P0 (earlier finisher) goes first');
+});
+
 run('single-active round → waiter goes first, no tiebreaker', () => {
   const s = mkOpenerState({
     holes: [3,0,0,0,0,0,0, 0,0,0,0,0,0,2],
