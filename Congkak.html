@@ -1294,19 +1294,26 @@ function App() {
   // ---- Keyboard cursor helpers ----
   // Rows ordered by SCREEN left→right so "right" always moves the cursor rightward on screen,
   // regardless of which player. (Single-user pass-and-play; both players face the same screen.)
-  const p0Row = [6,5,4,3,2,1,0];         // bottom row, screen L→R
-  const p1Row = [7,8,9,10,11,12,13];     // top row, screen L→R
+  const p0Row = [6,5,4,3,2,1,0];         // bottom row, screen L→R (unflipped view)
+  const p1Row = [7,8,9,10,11,12,13];     // top row, screen L→R (unflipped view)
+  // In seat 1's chess-flipped view, P1's own row renders bottom as [13,12,...,7]
+  // L→R, so the EFFECTIVE cursor row for P1 is reversed so D/A map to the
+  // correct screen direction. (P0's row is unused by seat 1 in online mode.)
+  const p1RowEffective = () => (netMode === 'online' && netRoom && netRoom.seat === 1) ? [13,12,11,10,9,8,7] : p1Row;
+  const rowForCursor = (p) => p === 0 ? p0Row : p1RowEffective();
 
-  // Default cursor snap: P1 starts on their screen-rightmost playable hole (hole 0);
-  // P2 keeps the leftmost default. Used on initial placement and after a hole is emptied.
   function defaultCursorHole(p) {
-    const row = p === 0 ? p0Row : p1Row;
-    const ordered = p === 0 ? [...row].reverse() : row;
+    const row = rowForCursor(p);
+    // Default to screen-rightmost for P0 always, and for P1 in flipped view
+    // (matches P0 convention in the viewer's frame). P1 unflipped preserves
+    // its historical default (leftmost of top row = hole 7).
+    const isFlippedForThisPlayer = (p === 1 && netMode === 'online' && netRoom && netRoom.seat === 1);
+    const ordered = (p === 0 || isFlippedForThisPlayer) ? [...row].reverse() : row;
     return ordered.find(i => board.holes[i] > 0) ?? null;
   }
 
   function playableForPlayer(p) {
-    const row = p === 0 ? p0Row : p1Row;
+    const row = rowForCursor(p);
     return row.filter(i => board.holes[i] > 0);
   }
 
@@ -1323,7 +1330,7 @@ function App() {
 
   function moveCursor(p, dir) {
     // dir: -1 = left, +1 = right
-    const row = p === 0 ? p0Row : p1Row;
+    const row = rowForCursor(p);
     const playables = row.filter(i => board.holes[i] > 0);
     if (playables.length === 0) return;
     const cur = cursorHole[p];
@@ -1585,13 +1592,14 @@ function App() {
 
   // ========== RENDER ==========
   // Chess-style per-seat view: seat 1 in online mode sees their holes (7-13) at
-  // the bottom and opponent's (0-6) at top. Rumahs and player panels swap too.
+  // the bottom and opponent's (0-6) at top. The row orderings are the original
+  // ranges REVERSED (180° rotation), so rumah adjacencies stay correct:
+  // hole 13 ↔ rumah1 and hole 7 ↔ rumah0 keep their physical neighbors.
   const viewFlipped = netMode === 'online' && netRoom && netRoom.seat === 1;
-  // Bottom row renders screen-L→R from the viewer's POV.
-  // Seat 0 view: bottom = P0 holes [6,5,4,3,2,1,0]; top = P1 holes [7,8,9,10,11,12,13]
-  // Seat 1 view: bottom = P1 holes [7,8,9,10,11,12,13]; top = P0 holes [0,1,2,3,4,5,6]
-  const bottomRange = viewFlipped ? [7,8,9,10,11,12,13] : [6,5,4,3,2,1,0];
-  const topRange    = viewFlipped ? [0,1,2,3,4,5,6]    : [7,8,9,10,11,12,13];
+  // Seat 0 view: bottom = P0 [6,5,4,3,2,1,0]; top = P1 [7,8,9,10,11,12,13]
+  // Seat 1 view: bottom = P1 [13,12,11,10,9,8,7]; top = P0 [0,1,2,3,4,5,6]
+  const bottomRange = viewFlipped ? [13,12,11,10,9,8,7] : [6,5,4,3,2,1,0];
+  const topRange    = viewFlipped ? [0,1,2,3,4,5,6]     : [7,8,9,10,11,12,13];
   // Rumahs and player panels swap too so YOUR rumah is on your left.
   const leftRumahPlayer  = viewFlipped ? 1 : 0;
   const rightRumahPlayer = viewFlipped ? 0 : 1;
