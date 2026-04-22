@@ -402,16 +402,25 @@
       events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
     } else if (newOpenerDone[0] && newOpenerDone[1]) {
       // Both players finished opener → switch to alternating.
-      // Starting turn: pick the player who was NOT active this round if possible
-      // (so whoever finished "earlier" conceptually waits). If both were active,
-      // default to the higher-seat (so P1 plays first in alternating, giving P0
-      // who "went first" in opener a brief rest). Adjust if round-end detection
-      // shows a single-active round.
+      //
+      // Rule for "who goes first in alternating":
+      //   - Both ended this same round: underdog goes first. Player with fewer
+      //     seeds in their rumah takes the first alternating turn; tiebreak P0.
+      //   - Only one active this round (the other finished earlier): the one
+      //     who finished earlier (was waiting) goes first — compensates for
+      //     the wait. Falls back to the mover if waiter has no moves.
       newPhase = 'alternating';
-      var bothActive = picks[0] != null && picks[1] != null;
-      if (bothActive) {
-        newTurn = playerHasMoves(b, 1) ? 1 : 0;
+      var bothActiveThisRound = picks[0] != null && picks[1] != null;
+      if (bothActiveThisRound) {
+        var underdog;
+        if (b.rumah[0] < b.rumah[1]) underdog = 0;
+        else if (b.rumah[1] < b.rumah[0]) underdog = 1;
+        else underdog = 0; // exact tie — tiebreak P0
+        if (playerHasMoves(b, underdog)) newTurn = underdog;
+        else if (playerHasMoves(b, 1 - underdog)) newTurn = 1 - underdog;
+        else newTurn = underdog; // unreachable given end-of-round check
       } else if (picks[0] != null) {
+        // P0 finished solo this round; P1 (who finished earlier) goes first
         newTurn = playerHasMoves(b, 1) ? 1 : 0;
       } else {
         newTurn = playerHasMoves(b, 0) ? 0 : 1;

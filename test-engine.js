@@ -361,6 +361,24 @@ run('both finish without rumah continuation → phase transitions to alternating
   assertTrue(out.events.some(e => e.kind === 'phaseChange'), 'phaseChange event emitted');
 });
 
+run('opener_round: underdog (fewer rumah seeds) goes first in alternating', () => {
+  // P0 hole 0 (2): 1, 2 → noCapture (own empty, not passed). rumah0 stays 0.
+  // P1 hole 13 (2): rumah1, 0 → mati (lands P0 side empty). rumah1 = 1.
+  // Underdog = P0 (rumah0=0 < rumah1=1) → turn = 0.
+  const s = mkOpenerState({ holes: [2,0,0,0,0,0,0, 0,0,0,0,0,0,2], openerDone: [false, false] });
+  const out = E.reducer(s, { type: 'opener_round', picks: [0, 13] });
+  assertEq(out.state.rumah, [0, 1]);
+  assertEq(out.state.turn, 0, 'P0 is underdog');
+});
+
+run('opener_round: tied rumah → tiebreak P0 gets first turn', () => {
+  // Both players land empty on own side, neither passes rumah → rumah stays [0,0].
+  const s = mkOpenerState({ holes: [2,0,0,0,0,0,0, 0,2,0,0,0,0,0], openerDone: [false, false] });
+  const out = E.reducer(s, { type: 'opener_round', picks: [0, 8] });
+  assertEq(out.state.rumah, [0, 0]);
+  assertEq(out.state.turn, 0, 'P0 wins the tiebreak');
+});
+
 run('rejects picks from already-done players', () => {
   const s = mkOpenerState({ openerDone: [true, false] });
   const out = E.reducer(s, { type: 'opener_round', picks: [0, 7] });
