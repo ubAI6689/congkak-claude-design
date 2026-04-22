@@ -1603,6 +1603,9 @@ function App() {
   // Seat 1 view: bottom = P1 [13,12,11,10,9,8,7]; top = P0 [0,1,2,3,4,5,6]
   const bottomRange = viewFlipped ? [13,12,11,10,9,8,7] : [6,5,4,3,2,1,0];
   const topRange    = viewFlipped ? [0,1,2,3,4,5,6]     : [7,8,9,10,11,12,13];
+  // Hand flip: the "across the table" player gets rotated 180°. In the default
+  // view that's P1; in seat 1's chess-flipped view it's P0.
+  const handFlipped = (p) => viewFlipped ? p === 0 : p === 1;
   // Rumahs and player panels swap too so YOUR rumah is on your left.
   const leftRumahPlayer  = viewFlipped ? 1 : 0;
   const rightRumahPlayer = viewFlipped ? 0 : 1;
@@ -1666,7 +1669,7 @@ function App() {
       <div className="arena">
         <div ref={boardWrapRef} className={"board-wrap" + (boardShake ? " shake" : "") + ((hand || hands[0] || hands[1]) ? " sowing" : "")}>
           {hand && (
-            <div className={"hand" + (hand.player === 1 ? " flipped" : "") + (hand.bump ? " bump" : "")} style={{ left: hand.x + 'px', top: hand.y + 'px' }}>
+            <div className={"hand" + (handFlipped(hand.player) ? " flipped" : "") + (hand.bump ? " bump" : "")} style={{ left: hand.x + 'px', top: hand.y + 'px' }}>
               <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                 {/* Outer black outline - all fingers at similar height (cupped, not pointing) */}
                 <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={hand.player === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
@@ -1684,7 +1687,7 @@ function App() {
           {[0, 1].map(p => hands[p] && (
             <div
               key={"h-" + p}
-              className={"hand" + (p === 1 ? " flipped" : "") + (hands[p].bump ? " bump" : "")}
+              className={"hand" + (handFlipped(p) ? " flipped" : "") + (hands[p].bump ? " bump" : "")}
               style={{ left: hands[p].x + 'px', top: hands[p].y + 'px' }}>
               <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                 <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
@@ -1706,7 +1709,7 @@ function App() {
             return (
               <div
                 key={"ghost-" + p}
-                className={"hand ghost" + (p === 1 ? " flipped" : "")}
+                className={"hand ghost" + (handFlipped(p) ? " flipped" : "")}
                 style={{ left: pos.x + 'px', top: pos.y - 40 + 'px' }}>
                 <svg className="hand-svg" viewBox="0 0 340 440" xmlns="http://www.w3.org/2000/svg">
                   <path d="M0 180H60V200H80V100h20V80h40V100h20v20h40v20h60v20h40v20h20v20h20V320H320v60H300v60H100V380H80V340H60V300H40V260H20V240H0V180" fill={p === 0 ? 'var(--p1-skin-stroke)' : 'var(--p2-skin-stroke)'}/>
