@@ -4,12 +4,18 @@
 // - Magic-link email dispatch via nodemailer/SES SMTP; falls back to stdout log in dev
 //
 // Env:
-//   BASE_URL        e.g. https://congkak.ubaidrac.xyz/beta  (used in the email link)
-//   SMTP_HOST       e.g. email-smtp.ap-southeast-1.amazonaws.com
-//   SMTP_PORT       587 (STARTTLS) or 465 (TLS)
-//   SMTP_USER       SES SMTP username (IAM user's SMTP credential)
-//   SMTP_PASS       SES SMTP password
-//   FROM_EMAIL      e.g. noreply@ubaidrac.xyz
+//   BASE_URL             used to build the magic link (must be publicly
+//                        reachable — NOT behind basic auth). e.g.
+//                        https://congkak.ubaidrac.xyz
+//   POST_AUTH_REDIRECT   where to send the browser after /auth/verify.
+//                        Defaults to BASE_URL+'/'. Set to e.g.
+//                        https://congkak.ubaidrac.xyz/beta/ to land in the
+//                        beta app (which may be behind basic auth).
+//   SMTP_HOST            e.g. email-smtp.ap-southeast-1.amazonaws.com
+//   SMTP_PORT            587 (STARTTLS) or 465 (TLS)
+//   SMTP_USER            SES SMTP username (IAM user's SMTP credential)
+//   SMTP_PASS            SES SMTP password
+//   FROM_EMAIL           e.g. noreply@ubaidrac.xyz
 // If SMTP_* are unset, we log the link to stdout instead of sending.
 
 const db = require('./db.js');
@@ -135,8 +141,10 @@ function handleVerify(req, res) {
   const user = db.getOrCreateUser(result.email);
   const session = db.createSession(user.id, SESSION_TTL_MS);
   setSessionCookie(res, session.id, SESSION_TTL_MS);
-  // Redirect back into the app. BASE_URL should point at the client root.
-  const back = (process.env.BASE_URL || '/').replace(/\/$/, '') + '/';
+  // Redirect back into the app. POST_AUTH_REDIRECT lets beta land in /beta/
+  // while the link itself stays on the basic-auth-free root.
+  const back = process.env.POST_AUTH_REDIRECT
+    || (process.env.BASE_URL || '/').replace(/\/$/, '') + '/';
   res.writeHead(302, { Location: back });
   res.end();
 }
