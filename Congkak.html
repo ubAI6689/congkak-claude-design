@@ -1372,7 +1372,7 @@ function App() {
   // ===== Multiplayer (Phase 3: lobby only) =====
   // 'local' = single-device. 'online-lobby' = modal open, pre-room. 'online' = in a room.
   const [netMode, setNetMode] = useState('local');
-  const [netStatus, setNetStatus] = useState('idle'); // idle | connecting | connected | error
+  const [netStatus, setNetStatus] = useState('idle'); // idle | connecting | connected | reconnecting | error
   const [netRoom, setNetRoom] = useState(null); // { code, seat, clientId, peers }
   const [netError, setNetError] = useState(null);
   // Rematch state: { requesterSeat } while a new-round request is in flight.
@@ -1384,6 +1384,12 @@ function App() {
   // shape: null | { myChoice: 'rock'|'paper'|'scissors'|null, picksStatus: [bool, bool], reveal: {choices, winner} | null }
   const [netTiebreaker, setNetTiebreaker] = useState(null);
   const netWsRef = useRef(null);
+  // Mirror netRoom so the WS close handler can read the latest without
+  // closure-capture issues (handler is bound at connect-time).
+  const netRoomRef = useRef(null);
+  // Auto-reconnect bookkeeping. Active while retrying after unexpected drop;
+  // cleared on successful rejoin or when the user leaves/gives up.
+  const netReconnectRef = useRef({ active: false, attempts: 0, timer: null });
   const [announce, setAnnounce] = useState(null);
   const [winner, setWinner] = useState(null);
   const [confetti, setConfetti] = useState([]);
@@ -1701,9 +1707,17 @@ function App() {
       }, 20_000);
     });
     ws.addEventListener('close', () => {
-      setNetStatus('idle');
       if (ws._pingTimer) { clearInterval(ws._pingTimer); ws._pingTimer = null; }
       if (netWsRef.current === ws) netWsRef.current = null;
+      // Auto-reconnect if we were in a room and the drop wasn't intentional.
+      // netLeaveRoom clears netRoomRef before the socket ever closes, so we
+      // only reach this branch on actual network drops.
+      const rm = netRoomRef.current;
+      if (rm && rm.code && rm.clientId) {
+        scheduleReconnect();
+      } else {
+        setNetStatus('idle');
+      }
     });
     ws.addEventListener('error', () => {
       setNetStatus('error');
@@ -1712,6 +1726,9 @@ function App() {
     ws.addEventListener('message', (ev) => {
       let msg; try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'room_joined') {
+        // Reset any in-flight reconnect bookkeeping on successful (re)join.
+        if (netReconnectRef.current.timer) clearTimeout(netReconnectRef.current.timer);
+        netReconnectRef.current = { active: false, attempts: 0, timer: null };
         setNetRoom({ code: msg.code, seat: msg.seat, clientId: msg.clientId, peers: msg.peers });
         setNetMode('online');
         setNetOpenerPicks([null, null]);
@@ -1732,6 +1749,11 @@ function App() {
       } else if (msg.type === 'room_update') {
         setNetRoom(prev => prev ? { ...prev, peers: msg.peers } : prev);
       } else if (msg.type === 'room_error') {
+        // If the error came from a rejoin attempt, it's fatal for this session —
+        // the seat is gone (window expired, room GC'd, etc.). Give up cleanly.
+        if (netReconnectRef.current.active) {
+          return giveUpReconnect(msg.reason || 'reconnect failed');
+        }
         setNetError(msg.reason || 'room error');
         setNetStatus('error');
       } else if (msg.type === 'move_applied') {
@@ -1818,6 +1840,42 @@ function App() {
     ws.send(JSON.stringify(obj));
     return true;
   }
+  // Auto-reconnect: after an unexpected WS drop, keep the held seat alive
+  // by re-opening the socket and sending rejoin_room with the saved clientId.
+  // Server holds the seat 60s (RECONNECT_WINDOW_MS). Backoff caps at 5 tries.
+  function scheduleReconnect() {
+    const r = netReconnectRef.current;
+    if (r.attempts >= 5) return giveUpReconnect('could not reconnect');
+    r.active = true;
+    r.attempts += 1;
+    setNetStatus('reconnecting');
+    const backoff = Math.min(500 * Math.pow(2, r.attempts - 1), 8000);
+    if (r.timer) clearTimeout(r.timer);
+    r.timer = setTimeout(() => {
+      if (!netReconnectRef.current.active) return;
+      const rm = netRoomRef.current;
+      if (!rm || !rm.code || !rm.clientId) return giveUpReconnect(null);
+      const ws = netConnect();
+      const payload = { type: 'rejoin_room', code: rm.code, clientId: rm.clientId };
+      if (ws.readyState === 1) netSend(payload);
+      else ws.addEventListener('open', () => netSend(payload), { once: true });
+    }, backoff);
+  }
+  function giveUpReconnect(reason) {
+    const r = netReconnectRef.current;
+    if (r.timer) clearTimeout(r.timer);
+    netReconnectRef.current = { active: false, attempts: 0, timer: null };
+    // Clear the ref synchronously so any in-flight WS close handler won't
+    // re-trigger reconnect before the setState flushes.
+    netRoomRef.current = null;
+    setNetRoom(null);
+    setNetMode('local');
+    if (reason) { setNetError('Disconnected: ' + reason); setNetStatus('error'); }
+    else setNetStatus('idle');
+  }
+  // Mirror netRoom into a ref so the close handler (bound at WS-open time)
+  // always reads the latest value.
+  useEffect(() => { netRoomRef.current = netRoom; }, [netRoom]);
   function netCreateRoom() {
     setNetError(null);
     const ws = netConnect();
@@ -1834,9 +1892,14 @@ function App() {
     else ws.addEventListener('open', () => netSend(payload), { once: true });
   }
   function netLeaveRoom() {
+    // Cancel any pending reconnect so the close handler doesn't retry.
+    if (netReconnectRef.current.timer) clearTimeout(netReconnectRef.current.timer);
+    netReconnectRef.current = { active: false, attempts: 0, timer: null };
     netSend({ type: 'leave_room' });
+    netRoomRef.current = null;
     setNetRoom(null);
     setNetMode('local');
+    setNetStatus('idle');
   }
   function netRequestNewRound() { netSend({ type: 'request_new_round' }); }
   function netRespondNewRound(accept) { netSend({ type: 'respond_new_round', accept }); }
@@ -2387,6 +2450,20 @@ function App() {
           </div>
         );
       })()}
+
+      {/* Reconnecting overlay — shown while auto-rejoining a dropped room */}
+      {netStatus === 'reconnecting' && netMode === 'online' && (
+        <div className="overlay" style={{zIndex: 40}}>
+          <div className="modal" style={{position:'relative', maxWidth: 420, textAlign:'center'}}>
+            <div className="eyebrow">Connection</div>
+            <h2>Reconnecting…</h2>
+            <p style={{marginTop: 12, color:'var(--ink-soft)'}}>Lost the connection. Trying to rejoin your room — the server holds your seat for 60 seconds.</p>
+            <div className="actions" style={{justifyContent:'center'}}>
+              <button className="btn" onClick={() => giveUpReconnect(null)}>Give up</button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Online lobby modal */}
       {netMode === 'online-lobby' && (
