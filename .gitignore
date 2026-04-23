@@ -1,2 +1,12 @@
 .claude/settings.local.json
 .DS_Store
+# Dev-only: server running from repo; engine.js is symlinked into server/
+# so node resolves require('./engine.js'). Prod has a real copy.
+server/engine.js
+# SQLite DB files (stay on the host, never committed)
+server/*.db
+server/*.db-journal
+server/*.db-wal
+server/*.db-shm
+# Local env overrides
+server/.env

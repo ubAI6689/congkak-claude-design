@@ -18,16 +18,33 @@
 // peers payload: [{seat, connected, clientId?}, ...] — always length 2, null seats omitted.
 // Actually: [{seat:0, connected:true|false}, {seat:1, connected:true|false}]
 
+const http = require('http');
 const { WebSocketServer } = require('ws');
 const crypto = require('crypto');
 const engine = require('./engine.js');
+const auth = require('./auth.js');
 
 const PORT = parseInt(process.env.PORT || '8787', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 const RECONNECT_WINDOW_MS = 60_000;
 const EMPTY_ROOM_GC_MS = 5 * 60_000;
 
-const wss = new WebSocketServer({ host: HOST, port: PORT });
+// HTTP server handles /auth/* endpoints and is also the base that WS upgrades
+// on (so the WS handshake sees the same Cookie header for session attach).
+const httpServer = http.createServer(async (req, res) => {
+  try {
+    const handled = await auth.route(req, res);
+    if (handled) return;
+    // Minimal default response — nginx routes /auth/* here; anything else is unexpected.
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('not found');
+  } catch (e) {
+    log(`http error ${e.message}`);
+    if (!res.headersSent) { res.writeHead(500); res.end('err'); }
+  }
+});
+
+const wss = new WebSocketServer({ server: httpServer });
 
 // rooms: Map<code, Room>
 // Room = { code, players: [Player|null, Player|null], createdAt, lastActivity }
@@ -417,12 +434,22 @@ let connId = 0;
 wss.on('connection', (ws, req) => {
   const id = ++connId;
   const from = (req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown').split(',')[0].trim();
-  log(`[${id}] connect from ${from}`);
+  // Look up session on handshake — Cookie header arrives with the upgrade.
+  const session = auth.sessionFromReq(req);
+  const userSuffix = session ? ` user=${session.user.email}` : ' guest';
+  log(`[${id}] connect from ${from}${userSuffix}`);
 
   // Per-connection state. Tracks which room/seat this socket is currently owned by.
-  const state = { connId: id, roomCode: null, seat: null, clientId: null };
+  const state = {
+    connId: id,
+    roomCode: null,
+    seat: null,
+    clientId: null,
+    userId: session ? session.user.id : null,
+    email:  session ? session.user.email : null,
+  };
 
-  send(ws, { type: 'hello', connId: id, t: Date.now() });
+  send(ws, { type: 'hello', connId: id, t: Date.now(), user: session ? { id: session.user.id, email: session.user.email } : null });
 
   ws.on('message', (buf) => {
     let msg;
@@ -451,14 +478,19 @@ wss.on('connection', (ws, req) => {
   ws.on('error', (err) => log(`[${id}] error ${err.message}`));
 });
 
-wss.on('listening', () => log(`listening on ws://${HOST}:${PORT}`));
+httpServer.listen(PORT, HOST, () => log(`listening on http://${HOST}:${PORT} (WS upgrade on same port)`));
 
 function log(msg) { process.stdout.write(`[${new Date().toISOString()}] ${msg}\n`); }
+
+// Prune expired tokens/sessions periodically
+setInterval(() => {
+  try { require('./db.js').pruneExpired(); } catch (e) { log(`prune err ${e.message}`); }
+}, 10 * 60_000).unref();
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
   process.on(sig, () => {
     log(`got ${sig}, shutting down`);
-    wss.close(() => process.exit(0));
+    wss.close(() => httpServer.close(() => process.exit(0)));
     setTimeout(() => process.exit(1), 2000).unref();
   });
 }
