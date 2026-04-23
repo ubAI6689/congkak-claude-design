@@ -666,6 +666,109 @@
     25%      { translate: -6px 2px; }
     75%      { translate: 6px 2px; }
   }
+
+  /* ===== RPS tiebreaker modal dramatics ===== */
+  .rps-countdown {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 140px;
+    font-weight: 600;
+    line-height: 1;
+    color: var(--ink);
+    text-align: center;
+    margin: 16px 0;
+    animation: rpsCountdownPop 0.6s cubic-bezier(.2,1.4,.4,1) forwards;
+    text-shadow: 0 4px 16px oklch(0.15 0.04 40 / 0.3);
+  }
+  @keyframes rpsCountdownPop {
+    0%   { transform: scale(0.3); opacity: 0; }
+    30%  { transform: scale(1.15); opacity: 1; }
+    70%  { transform: scale(1); opacity: 1; }
+    100% { transform: scale(0.85); opacity: 0.4; }
+  }
+  .rps-shoot {
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    font-size: 64px;
+    font-weight: 600;
+    text-align: center;
+    color: var(--accent);
+    margin: 16px 0;
+    letter-spacing: -0.01em;
+    animation: rpsShoot 0.35s ease-out forwards;
+  }
+  @keyframes rpsShoot {
+    0%   { transform: scale(0.5); opacity: 0; }
+    60%  { transform: scale(1.1); opacity: 1; }
+    100% { transform: scale(1); opacity: 1; }
+  }
+  .rps-emoji {
+    font-size: 110px;
+    line-height: 1;
+    display: inline-block;
+    transition: transform 0.4s cubic-bezier(.2,1.4,.4,1), opacity 0.4s ease, filter 0.4s ease;
+  }
+  .rps-emoji.shaking {
+    animation: rpsShake 0.12s linear 0s 4;
+  }
+  @keyframes rpsShake {
+    0%, 100% { transform: rotate(0deg); }
+    25%      { transform: rotate(-14deg) translateY(-3px); }
+    75%      { transform: rotate(14deg) translateY(-3px); }
+  }
+  .rps-emoji.winner {
+    transform: scale(1.25);
+    filter: drop-shadow(0 0 24px oklch(0.78 0.12 85 / 0.85));
+    animation: rpsWinnerPulse 1.2s ease-in-out infinite;
+  }
+  @keyframes rpsWinnerPulse {
+    0%, 100% { transform: scale(1.25); }
+    50%      { transform: scale(1.35); }
+  }
+  .rps-emoji.loser {
+    transform: scale(0.82);
+    opacity: 0.45;
+    filter: grayscale(0.7);
+  }
+  .rps-outcome {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 52px;
+    font-weight: 600;
+    font-style: italic;
+    text-align: center;
+    margin: 20px 0 8px;
+    letter-spacing: -0.01em;
+    animation: rpsOutcomePop 0.5s cubic-bezier(.2,1.4,.4,1) forwards;
+  }
+  .rps-outcome.win  { color: oklch(0.38 0.12 55); }
+  .rps-outcome.lose { color: oklch(0.4 0.06 30); }
+  .rps-outcome.tie  { color: var(--ink-soft); }
+  @keyframes rpsOutcomePop {
+    0%   { transform: scale(0.5) translateY(20px); opacity: 0; }
+    60%  { transform: scale(1.08) translateY(0); opacity: 1; }
+    100% { transform: scale(1) translateY(0); opacity: 1; }
+  }
+  .rps-emoji-row {
+    display: flex;
+    justify-content: center;
+    gap: 64px;
+    align-items: center;
+    margin: 28px 0 8px;
+    min-height: 140px;
+  }
+  .rps-emoji-slot { text-align: center; }
+  .rps-emoji-label {
+    font-size: 11px; margin-top: 12px;
+    font-family: 'JetBrains Mono', monospace;
+    letter-spacing: 0.2em; text-transform: uppercase;
+    color: var(--ink-soft);
+  }
+  .rps-vs {
+    font-size: 34px;
+    font-family: 'Cormorant Garamond', serif;
+    font-style: italic;
+    color: var(--ink-soft);
+    opacity: 0.6;
+  }
   @keyframes ghostHover {
     0%, 100% { transform: translate(-50%, -14%) scale(1); }
     50%      { transform: translate(-50%, -22%) scale(1.02); }
@@ -1655,23 +1758,12 @@ function App() {
       } else if (msg.type === 'tiebreaker_picks_update') {
         setNetTiebreaker(prev => prev ? { ...prev, picksStatus: msg.status } : { myChoice: null, picksStatus: msg.status, reveal: null });
       } else if (msg.type === 'tiebreaker_tie') {
-        // Brief reveal then reset for another round of RPS.
-        setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: { choices: msg.choices, winner: null } });
-        setTimeout(() => setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null }), 2000);
+        runTiebreakerReveal(msg.choices, null, null);
       } else if (msg.type === 'tiebreaker_result') {
         if (msg.seq > latestMoveRef.current.seq) {
           latestMoveRef.current = { seq: msg.seq, finalState: msg.state };
         }
-        // Show reveal, then apply the state (phase change → alternating).
-        setNetTiebreaker(prev => ({ myChoice: prev?.myChoice || null, picksStatus: [true, true], reveal: { choices: msg.choices, winner: msg.winner } }));
-        setTimeout(() => {
-          setNetTiebreaker(null);
-          const snap = msg.state;
-          setPhase(snap.phase);
-          phaseRef.current = snap.phase;
-          setCurrentPlayer(snap.turn);
-          if (snap.phase === 'alternating') announceText('turn-based play begins', 1200);
-        }, 2500);
+        runTiebreakerReveal(msg.choices, msg.winner, msg.state);
       } else if (msg.type === 'new_round_requested') {
         setNetRematch({ requesterSeat: msg.by });
       } else if (msg.type === 'new_round_declined') {
@@ -1744,6 +1836,45 @@ function App() {
     if (!netTiebreaker || netTiebreaker.myChoice) return;
     netSend({ type: 'tiebreaker_pick', choice });
     setNetTiebreaker(prev => prev ? { ...prev, myChoice: choice } : prev);
+  }
+
+  // Dramatic RPS reveal: 3 → 2 → 1 → "Shoot!" → shake → winner reveal → settle.
+  // Called with the server's result (or null winner for a tie).
+  async function runTiebreakerReveal(choices, winner, finalState) {
+    try { getCtx(); } catch (e) {}
+    const baseReveal = { choices, winner, stage: 'countdown', countdown: 3 };
+    setNetTiebreaker(prev => ({ ...(prev || { myChoice: null, picksStatus: [true, true] }), reveal: baseReveal }));
+    sfxDrop();
+    await sleep(700);
+    setNetTiebreaker(prev => prev ? { ...prev, reveal: { ...prev.reveal, countdown: 2 } } : prev);
+    sfxDrop();
+    await sleep(700);
+    setNetTiebreaker(prev => prev ? { ...prev, reveal: { ...prev.reveal, countdown: 1 } } : prev);
+    sfxDrop();
+    await sleep(700);
+    // "Shoot!" flash
+    setNetTiebreaker(prev => prev ? { ...prev, reveal: { ...prev.reveal, stage: 'shoot' } } : prev);
+    sfxCapture();
+    await sleep(450);
+    // Emojis appear, shaking
+    setNetTiebreaker(prev => prev ? { ...prev, reveal: { ...prev.reveal, stage: 'shake' } } : prev);
+    await sleep(500);
+    // Winner / tie reveal
+    setNetTiebreaker(prev => prev ? { ...prev, reveal: { ...prev.reveal, stage: 'final' } } : prev);
+    if (winner != null) {
+      sfxRumah();
+      // Personal confetti only if you won
+      if (netRoom && netRoom.seat === winner) burstConfetti();
+    }
+    await sleep(winner == null ? 1800 : 2400);
+    // Dismiss modal and apply final state
+    setNetTiebreaker(null);
+    if (finalState) {
+      setPhase(finalState.phase);
+      phaseRef.current = finalState.phase;
+      setCurrentPlayer(finalState.turn);
+      if (finalState.phase === 'alternating') announceText('turn-based play begins', 1200);
+    }
   }
 
   // Auto-join from URL param on first load: ?room=ABCDEF
@@ -2115,67 +2246,97 @@ function App() {
         </div>
       )}
 
-      {/* RPS tiebreaker modal (MP) — shown when both players finish opener same round */}
+      {/* RPS tiebreaker modal (MP) — shown when both players finish opener same tick */}
       {netMode === 'online' && netRoom && netTiebreaker && (() => {
         const { myChoice, picksStatus, reveal } = netTiebreaker;
         const mySeat = netRoom.seat;
         const oppSeat = 1 - mySeat;
         const emoji = { rock: '🪨', paper: '📄', scissors: '✂️' };
         const labels = { rock: 'Rock', paper: 'Paper', scissors: 'Scissors' };
+        const stage = reveal?.stage;
+        const showEmojis = stage === 'shake' || stage === 'final';
+        const isWin  = reveal && reveal.winner === mySeat;
+        const isLose = reveal && reveal.winner != null && reveal.winner !== mySeat;
+        const isTie  = reveal && reveal.winner == null;
+        const classifyEmoji = (p) => {
+          if (stage !== 'final' || !reveal) return 'rps-emoji';
+          if (reveal.winner == null) return 'rps-emoji';
+          return 'rps-emoji ' + (reveal.winner === p ? 'winner' : 'loser');
+        };
         return (
           <div className="overlay" onClick={(e) => e.stopPropagation()}>
-            <div className="modal" style={{position:'relative', maxWidth: 520, textAlign:'center'}}>
+            <div className="modal" style={{position:'relative', maxWidth: 560, textAlign:'center', minHeight: 380}}>
               <div className="eyebrow">Tiebreaker</div>
-              <h2>Both done — <em>rock paper scissors</em></h2>
-              {reveal ? (
-                // Reveal state
+
+              {/* Pre-reveal: pick UI OR waiting */}
+              {!reveal && !myChoice && (
                 <>
-                  <p style={{marginTop: 16, fontSize: 15}}>
-                    {reveal.winner == null ? 'Tie! Pick again.' : (reveal.winner === mySeat ? 'You win — you go first!' : 'Opponent wins — they go first.')}
-                  </p>
-                  <div style={{display:'flex', justifyContent:'center', gap: 40, margin: '24px 0', fontSize: 72, lineHeight: 1}}>
-                    <div style={{textAlign:'center'}}>
-                      <div>{emoji[reveal.choices[mySeat]] || '?'}</div>
-                      <div style={{fontSize: 11, marginTop: 8, fontFamily:"'JetBrains Mono', monospace", letterSpacing: '0.18em', textTransform:'uppercase', color:'var(--ink-soft)'}}>You</div>
-                    </div>
-                    <div style={{fontSize: 32, alignSelf:'center', color:'var(--ink-soft)', fontFamily:"'Cormorant Garamond', serif", fontStyle:'italic'}}>vs</div>
-                    <div style={{textAlign:'center'}}>
-                      <div>{emoji[reveal.choices[oppSeat]] || '?'}</div>
-                      <div style={{fontSize: 11, marginTop: 8, fontFamily:"'JetBrains Mono', monospace", letterSpacing: '0.18em', textTransform:'uppercase', color:'var(--ink-soft)'}}>Opponent</div>
-                    </div>
-                  </div>
-                </>
-              ) : myChoice ? (
-                // I've picked, waiting for opponent
-                <>
-                  <p style={{marginTop: 16}}>Your pick: <strong style={{fontSize: 40, verticalAlign:'middle'}}>{emoji[myChoice]}</strong></p>
-                  <p style={{color:'var(--ink-soft)', fontSize: 13}}>{picksStatus[oppSeat] ? 'Revealing…' : 'Waiting for opponent…'}</p>
-                </>
-              ) : (
-                // Pick UI
-                <>
-                  <p style={{marginTop: 12, color:'var(--ink-soft)'}}>Both of you finished the opener at the same time. Play rock-paper-scissors to decide who takes the first turn.</p>
+                  <h2>Same moment! <em>RPS</em> decides.</h2>
+                  <p style={{marginTop: 12, color:'var(--ink-soft)'}}>You both finished the opener on the exact same tick. Rock-paper-scissors for first turn.</p>
                   <div style={{display:'flex', justifyContent:'center', gap: 16, margin: '24px 0'}}>
                     {['rock', 'paper', 'scissors'].map(c => (
                       <button
                         key={c}
                         onClick={() => netTiebreakerPick(c)}
                         style={{
-                          width: 96, height: 96,
-                          fontSize: 48,
-                          borderRadius: 16,
+                          width: 108, height: 108,
+                          fontSize: 56,
+                          borderRadius: 18,
                           border: '2px solid oklch(0.22 0.02 50 / 0.18)',
                           background: 'oklch(1 0 0 / 0.7)',
                           cursor: 'pointer',
                           transition: 'all 0.15s ease',
+                          lineHeight: 1,
                         }}
-                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-2px)'; e.currentTarget.style.borderColor = 'var(--accent)'; }}
-                        onMouseLeave={(e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.borderColor = 'oklch(0.22 0.02 50 / 0.18)'; }}
+                        onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-3px)'; e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.boxShadow = '0 8px 20px oklch(0.15 0.04 40 / 0.25)'; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.transform = ''; e.currentTarget.style.borderColor = 'oklch(0.22 0.02 50 / 0.18)'; e.currentTarget.style.boxShadow = ''; }}
                         title={labels[c]}
                       >{emoji[c]}</button>
                     ))}
                   </div>
-                  {picksStatus[oppSeat] && <p style={{color:'var(--ink-soft)', fontSize: 13}}>Opponent has picked — your turn.</p>}
+                  {picksStatus[oppSeat] && <p style={{color:'var(--ink-soft)', fontSize: 13}}>Opponent has picked — your move.</p>}
+                </>
+              )}
+              {!reveal && myChoice && (
+                <>
+                  <h2>Locked in. <em>Waiting…</em></h2>
+                  <div style={{fontSize: 96, margin: '24px 0', lineHeight: 1}}>{emoji[myChoice]}</div>
+                  <p style={{color:'var(--ink-soft)', fontSize: 13}}>{picksStatus[oppSeat] ? 'Both ready — revealing…' : 'Waiting for opponent…'}</p>
+                </>
+              )}
+
+              {/* Reveal: countdown → shoot → shake → final */}
+              {reveal && stage === 'countdown' && (
+                <>
+                  <h2 style={{opacity: 0.7}}>Ready…</h2>
+                  <div key={'cd-' + reveal.countdown} className="rps-countdown">{reveal.countdown}</div>
+                </>
+              )}
+              {reveal && stage === 'shoot' && (
+                <>
+                  <h2 style={{opacity: 0.7}}>…</h2>
+                  <div className="rps-shoot">Shoot!</div>
+                </>
+              )}
+              {reveal && showEmojis && (
+                <>
+                  <h2 style={{opacity: stage === 'final' ? 0 : 0.5, transition: 'opacity 0.3s ease'}}>…</h2>
+                  <div className="rps-emoji-row">
+                    <div className="rps-emoji-slot">
+                      <div className={classifyEmoji(mySeat) + (stage === 'shake' ? ' shaking' : '')}>{emoji[reveal.choices[mySeat]] || '?'}</div>
+                      <div className="rps-emoji-label">You</div>
+                    </div>
+                    <div className="rps-vs">vs</div>
+                    <div className="rps-emoji-slot">
+                      <div className={classifyEmoji(oppSeat) + (stage === 'shake' ? ' shaking' : '')}>{emoji[reveal.choices[oppSeat]] || '?'}</div>
+                      <div className="rps-emoji-label">Opponent</div>
+                    </div>
+                  </div>
+                  {stage === 'final' && (
+                    <div className={"rps-outcome " + (isWin ? 'win' : isLose ? 'lose' : 'tie')}>
+                      {isTie ? 'Tie — pick again' : isWin ? 'You win!' : 'Opponent wins'}
+                    </div>
+                  )}
                 </>
               )}
             </div>
