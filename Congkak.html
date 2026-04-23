@@ -1692,9 +1692,17 @@ function App() {
     const url = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
     const ws = new WebSocket(url);
     netWsRef.current = ws;
-    ws.addEventListener('open', () => setNetStatus('connected'));
+    ws.addEventListener('open', () => {
+      setNetStatus('connected');
+      // 20s app-level ping keeps the socket alive through Cloudflare's
+      // ~100s idle-drop. Server replies with {type:'pong'}.
+      ws._pingTimer = setInterval(() => {
+        if (ws.readyState === 1) { try { ws.send(JSON.stringify({ type: 'ping' })); } catch {} }
+      }, 20_000);
+    });
     ws.addEventListener('close', () => {
       setNetStatus('idle');
+      if (ws._pingTimer) { clearInterval(ws._pingTimer); ws._pingTimer = null; }
       if (netWsRef.current === ws) netWsRef.current = null;
     });
     ws.addEventListener('error', () => {
