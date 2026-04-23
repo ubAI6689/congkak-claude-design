@@ -1384,6 +1384,13 @@ function App() {
   // shape: null | { myChoice: 'rock'|'paper'|'scissors'|null, picksStatus: [bool, bool], reveal: {choices, winner} | null }
   const [netTiebreaker, setNetTiebreaker] = useState(null);
   const netWsRef = useRef(null);
+  // Account (Phase 6). null = guest; {id, email} when signed in. Loaded on
+  // mount via GET /auth/me and refreshed on WS hello payload.
+  const [user, setUser] = useState(null);
+  const [showSignIn, setShowSignIn] = useState(false);
+  const [signInEmail, setSignInEmail] = useState('');
+  const [signInStatus, setSignInStatus] = useState('idle'); // idle | sending | sent | error
+  const [signInError, setSignInError] = useState(null);
   // Mirror netRoom so the WS close handler can read the latest without
   // closure-capture issues (handler is bound at connect-time).
   const netRoomRef = useRef(null);
@@ -1876,6 +1883,42 @@ function App() {
   // Mirror netRoom into a ref so the close handler (bound at WS-open time)
   // always reads the latest value.
   useEffect(() => { netRoomRef.current = netRoom; }, [netRoom]);
+  // Fetch the current session on first load so the topbar reflects logged-in
+  // state immediately (before any WS connection is made).
+  useEffect(() => {
+    fetch('/auth/me', { credentials: 'include' })
+      .then(r => r.ok ? r.json() : null)
+      .then(j => { if (j && j.user) setUser(j.user); })
+      .catch(() => {});
+  }, []);
+  async function authRequestLink(email) {
+    setSignInStatus('sending');
+    setSignInError(null);
+    try {
+      const r = await fetch('/auth/request', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ email }),
+      });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || 'send failed');
+      setSignInStatus('sent');
+    } catch (e) {
+      setSignInStatus('error');
+      setSignInError(e.message);
+    }
+  }
+  async function authLogout() {
+    try {
+      await fetch('/auth/logout', { method: 'POST', credentials: 'include' });
+    } catch {}
+    setUser(null);
+    // Drop any active WS so next connect doesn't carry the old session.
+    if (netWsRef.current) {
+      try { netWsRef.current.close(); } catch {}
+    }
+  }
   function netCreateRoom() {
     setNetError(null);
     const ws = netConnect();
@@ -2057,6 +2100,17 @@ function App() {
           <button className="btn ghost" onClick={() => setShowRules(true)}>How to play</button>
           <button className="btn ghost" onClick={() => setShowControls(v => !v)}>Controls</button>
           <button className="btn ghost" onClick={() => setShowTweaks(v => !v)}>Tweaks</button>
+          {!user && (
+            <button className="btn ghost" onClick={() => { setShowSignIn(true); setSignInStatus('idle'); setSignInError(null); }}>Sign in</button>
+          )}
+          {user && (
+            <span className="btn ghost" style={{pointerEvents:'none', fontSize:12, opacity:0.85}} title={user.email}>
+              {user.email.split('@')[0]}
+            </span>
+          )}
+          {user && (
+            <button className="btn ghost" onClick={authLogout} style={{fontSize:11, opacity:0.7}}>sign out</button>
+          )}
           {netMode === 'local' && (
             <button className="btn ghost" onClick={() => setNetMode('online-lobby')}>Play online</button>
           )}
@@ -2450,6 +2504,49 @@ function App() {
           </div>
         );
       })()}
+
+      {/* Sign-in modal (magic-link) */}
+      {showSignIn && !user && (
+        <div className="overlay" onClick={(e) => { if (e.target.classList.contains('overlay')) setShowSignIn(false); }}>
+          <div className="modal" style={{position:'relative', maxWidth: 440}}>
+            <button className="btn ghost modal-close" onClick={() => setShowSignIn(false)}>close</button>
+            <div className="eyebrow">Sign in</div>
+            {signInStatus !== 'sent' ? (
+              <>
+                <h2>Get a <em>sign-in link</em></h2>
+                <p style={{marginTop: 12, marginBottom: 18, color:'var(--ink-soft)'}}>
+                  Enter your email. We'll send you a one-time link — no passwords. Accounts are optional; guests play fine.
+                </p>
+                <form onSubmit={(e) => { e.preventDefault(); if (signInEmail.trim()) authRequestLink(signInEmail.trim()); }} style={{display:'flex', gap: 8}}>
+                  <input
+                    type="email"
+                    required
+                    placeholder="you@example.com"
+                    value={signInEmail}
+                    onChange={e => setSignInEmail(e.target.value)}
+                    disabled={signInStatus === 'sending'}
+                    style={{flex:1, padding:'10px 14px', fontFamily:"'JetBrains Mono', monospace", fontSize:14, borderRadius:8, border:'1px solid oklch(0.22 0.02 50 / 0.18)', background:'oklch(1 0 0 / 0.5)'}}
+                    autoFocus
+                  />
+                  <button type="submit" className="btn primary" disabled={signInStatus === 'sending' || !signInEmail.trim()}>
+                    {signInStatus === 'sending' ? 'sending…' : 'Send link'}
+                  </button>
+                </form>
+                {signInStatus === 'error' && <div style={{marginTop:10, color:'#a02020', fontSize:13}}>error: {signInError}</div>}
+              </>
+            ) : (
+              <>
+                <h2>Check your <em>email</em></h2>
+                <p style={{marginTop: 12, marginBottom: 8}}>We sent a sign-in link to <strong>{signInEmail}</strong>.</p>
+                <p style={{color:'var(--ink-soft)', fontSize:13}}>The link expires in 15 minutes. Clicking it will bring you back here, signed in.</p>
+                <div className="actions" style={{justifyContent:'flex-end', marginTop: 18}}>
+                  <button className="btn" onClick={() => { setShowSignIn(false); setSignInStatus('idle'); setSignInEmail(''); }}>Close</button>
+                </div>
+              </>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Reconnecting overlay — shown while auto-rejoining a dropped room */}
       {netStatus === 'reconnecting' && netMode === 'online' && (
