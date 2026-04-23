@@ -28,6 +28,9 @@ const PORT = parseInt(process.env.PORT || '8787', 10);
 const HOST = process.env.HOST || '127.0.0.1';
 const RECONNECT_WINDOW_MS = 60_000;
 const EMPTY_ROOM_GC_MS = 5 * 60_000;
+// When a signed-in user creates a room, we keep it around much longer so they
+// can come back in a new browser session (no stored clientId) and still find it.
+const OWNER_ROOM_GC_MS = 24 * 3600_000;
 
 // HTTP server handles /auth/* endpoints and is also the base that WS upgrades
 // on (so the WS handshake sees the same Cookie header for session attach).
@@ -111,10 +114,12 @@ function handleCreateRoom(ws, state) {
   if (state.roomCode) return send(ws, { type: 'room_error', reason: 'already-in-room' });
   const code = newCode();
   const clientId = crypto.randomUUID();
-  const player = { ws, clientId, connected: true, disconnectedAt: 0 };
+  const player = { ws, clientId, connected: true, disconnectedAt: 0, userId: state.userId || null };
   const room = {
     code,
     players: [player, null],
+    // Signed-in creator = owner; room persists 24h idle rather than 5 min.
+    ownerUserId: state.userId || null,
     gameState: freshGameState(),
     seq: 0,
     pendingNewRoundBy: null,  // null | 0 | 1 — seat that has requested a rematch
@@ -128,7 +133,7 @@ function handleCreateRoom(ws, state) {
   state.seat = 0;
   state.clientId = clientId;
   send(ws, { type: 'room_joined', code, seat: 0, clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
-  log(`room ${code} created by seat 0`);
+  log(`room ${code} created by seat 0${state.userId ? ' (owner uid=' + state.userId + ')' : ''}`);
 }
 
 function handleJoinRoom(ws, state, msg) {
@@ -136,17 +141,29 @@ function handleJoinRoom(ws, state, msg) {
   const code = (msg.code || '').toUpperCase();
   const room = rooms.get(code);
   if (!room) return send(ws, { type: 'room_error', reason: 'no-such-room' });
-  const seat = [0, 1].find(s => !room.players[s] || (!room.players[s].connected && room.players[s].disconnectedAt + RECONNECT_WINDOW_MS < Date.now()));
-  if (seat === undefined) return send(ws, { type: 'room_error', reason: 'room-full' });
+  // Signed-in reattach: if any seat already belongs to this userId, reclaim it
+  // (covers the "closed browser, new clientId" case for signed-in players).
+  let seat = -1;
+  if (state.userId) {
+    const ownSeat = [0, 1].find(s => room.players[s] && room.players[s].userId === state.userId);
+    if (ownSeat !== undefined) {
+      if (room.players[ownSeat].connected) return send(ws, { type: 'room_error', reason: 'already-connected' });
+      seat = ownSeat;
+    }
+  }
+  if (seat === -1) {
+    seat = [0, 1].find(s => !room.players[s] || (!room.players[s].connected && room.players[s].disconnectedAt + RECONNECT_WINDOW_MS < Date.now())) ?? -1;
+  }
+  if (seat === -1) return send(ws, { type: 'room_error', reason: 'room-full' });
   const clientId = crypto.randomUUID();
-  room.players[seat] = { ws, clientId, connected: true, disconnectedAt: 0 };
+  room.players[seat] = { ws, clientId, connected: true, disconnectedAt: 0, userId: state.userId || null };
   room.lastActivity = Date.now();
   state.roomCode = code;
   state.seat = seat;
   state.clientId = clientId;
   send(ws, { type: 'room_joined', code, seat, clientId, peers: peerSummary(room), gameState: room.gameState, seq: room.seq });
   sendRoomUpdate(room);
-  log(`room ${code} joined by seat ${seat}`);
+  log(`room ${code} joined by seat ${seat}${state.userId ? ' uid=' + state.userId : ''}`);
 }
 
 function handleRejoinRoom(ws, state, msg) {
@@ -164,6 +181,7 @@ function handleRejoinRoom(ws, state, msg) {
   p.ws = ws;
   p.connected = true;
   p.disconnectedAt = 0;
+  if (state.userId) p.userId = state.userId;
   room.lastActivity = Date.now();
   state.roomCode = code;
   state.seat = seat;
@@ -420,7 +438,8 @@ setInterval(() => {
         log(`room ${room.code} seat ${i} reconnect-expired, freed`);
       }
     }
-    if (now - room.lastActivity > EMPTY_ROOM_GC_MS) maybeGCRoom(room);
+    const idleLimit = room.ownerUserId != null ? OWNER_ROOM_GC_MS : EMPTY_ROOM_GC_MS;
+    if (now - room.lastActivity > idleLimit) maybeGCRoom(room);
   }
 }, 10_000).unref();
 
