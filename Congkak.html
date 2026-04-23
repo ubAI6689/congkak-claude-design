@@ -1867,7 +1867,13 @@ function App() {
       if (netRoom && netRoom.seat === winner) burstConfetti();
     }
     await sleep(winner == null ? 1800 : 2400);
-    // Dismiss modal and apply final state
+    if (winner == null) {
+      // Tie — reset modal to pick-again state. Server has already cleared
+      // tiebreakerPicks; players select again.
+      setNetTiebreaker({ myChoice: null, picksStatus: [false, false], reveal: null });
+      return;
+    }
+    // Winner — dismiss modal and apply final state
     setNetTiebreaker(null);
     if (finalState) {
       setPhase(finalState.phase);
