@@ -94,6 +94,69 @@ scp Congkak.html engine.js server/server.js ovh:/tmp/ \
               && echo deployed'
 ```
 
+### Phase 6: accounts files (auth.js, db.js, package.json)
+
+The server now also has `auth.js` and `db.js`. If either changes, or when adding
+new npm deps, also run the cache-override install so `www-data` can write logs:
+
+```bash
+scp server/auth.js server/db.js server/package.json ovh:/tmp/ \
+  && ssh ovh 'sudo mv /tmp/auth.js /opt/congkak-server/auth.js \
+              && sudo mv /tmp/db.js  /opt/congkak-server/db.js \
+              && sudo mv /tmp/package.json /opt/congkak-server/package.json \
+              && sudo chown www-data:www-data /opt/congkak-server/auth.js /opt/congkak-server/db.js /opt/congkak-server/package.json \
+              && cd /opt/congkak-server && sudo -u www-data npm install --production --cache=/tmp/npm-cache \
+              && sudo systemctl restart congkak-server'
+```
+
+### Env vars (systemd drop-in)
+
+Auth env lives in `/etc/systemd/system/congkak-server.service.d/env.conf`. Edit
+with `sudo visudo`-style, then `daemon-reload` + `restart`:
+
+```bash
+ssh ovh 'sudo systemctl edit congkak-server --drop-in=env'
+# Or edit the file directly:
+# sudo nano /etc/systemd/system/congkak-server.service.d/env.conf
+# then:
+# sudo systemctl daemon-reload && sudo systemctl restart congkak-server
+```
+
+Required for auth:
+- `BASE_URL=https://congkak.ubaidrac.xyz` (link-building; must be public)
+- `POST_AUTH_REDIRECT=https://congkak.ubaidrac.xyz/beta/` (post-verify landing)
+- `DB_PATH=/opt/congkak-server/congkak.db`
+
+Magic-link email (SES SMTP — while unset, links log to `journalctl -u congkak-server`):
+- `SMTP_HOST=email-smtp.ap-southeast-1.amazonaws.com`
+- `SMTP_PORT=587`
+- `SMTP_USER=<SES SMTP username>`
+- `SMTP_PASS=<SES SMTP password>`
+- `FROM_EMAIL=noreply@ubaidrac.xyz`
+
+### Nginx `/auth/` location
+
+The server expects `/auth/*` to reach `127.0.0.1:8787`. Added as a sibling of
+`/ws` in `/etc/nginx/sites-available/congkak`:
+
+```nginx
+location /auth/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
+
+After editing: `sudo nginx -t && sudo systemctl reload nginx`.
+
+### SQLite DB file
+
+Lives at `/opt/congkak-server/congkak.db` (WAL mode). Owned by `www-data`. No
+backup script yet — if it matters later, cron `sqlite3 .backup`.
+
 ## Verify after deploy
 
 ```bash
