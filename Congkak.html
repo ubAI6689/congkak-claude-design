@@ -1380,6 +1380,11 @@ function App() {
   // MP opener-sim: per-player committed pick for the current lockstep round.
   // Mirrors the server's state; updated on opener_picks_update broadcasts.
   const [netOpenerPicks, setNetOpenerPicks] = useState([null, null]);
+  // MP opener-sim intra-round pause. Mirrors state.pendingPause from server.
+  // When set, the pauser(s) show a picker on their own row; the non-pauser
+  // (if any) sees their sowing hand frozen in place. Null in the common case.
+  // Shape: { pausers: [bool, bool], frozen: [null|{currentHole,carrying,...}, ...], tick }
+  const [netPause, setNetPause] = useState(null);
   // Tiebreaker (RPS) state when both players end opener same round.
   // shape: null | { myChoice: 'rock'|'paper'|'scissors'|null, picksStatus: [bool, bool], reveal: {choices, winner} | null }
   const [netTiebreaker, setNetTiebreaker] = useState(null);
@@ -1539,6 +1544,8 @@ function App() {
     // and keyboard routing to opponent's row.
     if (netMode === 'online' && netRoom && netRoom.seat !== p) return false;
     if (phaseRef.current === 'opener-sim') {
+      // Pause mode: only the pausing player(s) may pick a new hole.
+      if (netPause) return !!netPause.pausers[p];
       if (openerDoneRef.current[p]) return false;
       if (hands[p]) return false;
       return !busyRef.current[p];
@@ -1740,6 +1747,7 @@ function App() {
         setNetMode('online');
         setNetOpenerPicks([null, null]);
         setNetTiebreaker(null);
+        setNetPause(msg.gameState ? (msg.gameState.pendingPause || null) : null);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         // Snap to authoritative server state
         if (msg.gameState) {
@@ -1812,6 +1820,7 @@ function App() {
         setNetRematch(null);
         setNetOpenerPicks([null, null]);
         setNetTiebreaker(null);
+        setNetPause(null);
         latestMoveRef.current = { seq: msg.seq || 0, finalState: msg.gameState || null };
         const g = msg.gameState;
         if (g) {
@@ -2068,7 +2077,10 @@ function App() {
 
   const playerActive = (p) => {
     if (winner) return false;
-    if (inOpener) return !openerDoneRef.current[p];
+    if (inOpener) {
+      if (netPause) return !!netPause.pausers[p];
+      return !openerDoneRef.current[p];
+    }
     return currentPlayer === p;
   };
   const p0Active = playerActive(0);
@@ -2797,12 +2809,24 @@ function App() {
     }
     if (!snap.awaitingTiebreaker) setCurrentPlayer(snap.turn);
     setActiveHole(null);
+    // Pause handling: if the segment ended with pendingPause, keep frozen
+    // players' hands visible; clear the pauser's hand (they just emptied).
+    const paused = snap.pendingPause;
+    setNetPause(paused || null);
     for (const p of activePlayers) {
-      setTimeout(() => setHands(prev => ({ ...prev, [p]: null })), 280);
+      const isFrozen = paused && paused.frozen && paused.frozen[p];
+      if (!isFrozen) {
+        setTimeout(() => setHands(prev => ({ ...prev, [p]: null })), 280);
+      }
     }
     setTimeout(() => setMpAnimating(prev => {
       const next = { ...prev };
-      for (const p of activePlayers) next[p] = false;
+      for (const p of activePlayers) {
+        // Keep mpAnimating true for frozen players so the "opponent choosing"
+        // banner logic doesn't flicker on during the pause for the wrong side.
+        if (paused && paused.frozen && paused.frozen[p]) next[p] = true;
+        else next[p] = false;
+      }
       return next;
     }), 300);
     if (snap.winner) {

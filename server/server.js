@@ -276,13 +276,55 @@ function handleCommitOpenerPick(ws, state, msg) {
   if (room.gameState.phase !== 'opener-sim') return send(ws, { type: 'move_rejected', reason: 'not-opener-phase' });
   const seat = state.seat;
   if (seat !== msg.player) return send(ws, { type: 'move_rejected', reason: 'seat-mismatch' });
-  if (room.gameState.openerDone[seat]) return send(ws, { type: 'move_rejected', reason: 'already-done' });
   const hole = msg.hole;
-  // Validate hole
+  // Hole validation (shared across round-start and pause-resume)
   if (hole < 0 || hole > 13) return send(ws, { type: 'move_rejected', reason: 'bad-hole' });
   const isP0side = hole >= 0 && hole <= 6;
   if ((seat === 0) !== isP0side) return send(ws, { type: 'move_rejected', reason: 'not-own-side' });
   if (room.gameState.holes[hole] === 0) return send(ws, { type: 'move_rejected', reason: 'empty-hole' });
+
+  const paused = room.gameState.pendingPause;
+  if (paused) {
+    // Pause-resume mode: only players listed in pendingPause.pausers may commit.
+    if (!paused.pausers[seat]) return send(ws, { type: 'move_rejected', reason: 'not-pauser' });
+    if (room.openerPicks[seat] != null) return; // dup
+    room.openerPicks[seat] = hole;
+    room.lastActivity = Date.now();
+    broadcastRoom(room, { type: 'opener_picks_update', picks: room.openerPicks.slice() });
+
+    const allReady = [0, 1].every(p => !paused.pausers[p] || room.openerPicks[p] != null);
+    if (!allReady) return;
+
+    const picks = [
+      paused.pausers[0] ? room.openerPicks[0] : null,
+      paused.pausers[1] ? room.openerPicks[1] : null,
+    ];
+    const result = engine.reducer(room.gameState, { type: 'opener_resume', picks });
+    if (result.events.length === 1 && result.events[0].kind === 'invalid') {
+      room.openerPicks = [null, null];
+      broadcastRoom(room, { type: 'move_rejected', reason: result.events[0].reason });
+      broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
+      return;
+    }
+    room.gameState = result.state;
+    room.seq += 1;
+    room.openerPicks = [null, null];
+    room.lastActivity = Date.now();
+    broadcastRoom(room, {
+      type: 'opener_round_applied',
+      seq: room.seq,
+      picks,
+      events: result.events,
+      state: result.state,
+      resume: true,
+    });
+    broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
+    log(`room ${room.code} opener_resume seq=${room.seq} picks=${JSON.stringify(picks)} nowPaused=${result.state.pendingPause ? 'yes' : 'no'} phase=${result.state.phase}`);
+    return;
+  }
+
+  // Normal round-start commit flow
+  if (room.gameState.openerDone[seat]) return send(ws, { type: 'move_rejected', reason: 'already-done' });
 
   room.openerPicks[seat] = hole;
   room.lastActivity = Date.now();
@@ -318,7 +360,7 @@ function handleCommitOpenerPick(ws, state, msg) {
     state: result.state,
   });
   broadcastRoom(room, { type: 'opener_picks_update', picks: [null, null] });
-  log(`room ${room.code} opener_round applied seq=${room.seq} picks=${JSON.stringify(picks)} done=${JSON.stringify(result.state.openerDone)} phase=${result.state.phase}`);
+  log(`room ${room.code} opener_round applied seq=${room.seq} picks=${JSON.stringify(picks)} paused=${result.state.pendingPause ? 'yes' : 'no'} done=${JSON.stringify(result.state.openerDone)} phase=${result.state.phase}`);
 }
 
 // Rock paper scissors tiebreak helpers
