@@ -106,6 +106,12 @@
       // opener→alternating transition is blocked on a tiebreaker resolution
       // (RPS). Cleared by resolve_tiebreaker action.
       awaitingTiebreaker: false,
+      // Intra-round pause: set when a hand lands in its own rumah (anotherTurn)
+      // while the other hand is still actively sowing. Shape:
+      //   { tick, pausers: [bool, bool], frozen: [hand|null, hand|null],
+      //     openerDoneSoFar: [bool, bool] }
+      // Cleared by opener_resume. Null in the common case.
+      pendingPause: null,
       seedsPerHole: seedsPerHole,
       winner: null,
       seq: 0,
@@ -139,6 +145,9 @@
     }
     if (action.type === 'opener_round' && state.phase === 'opener-sim') {
       return openerRound(state, action.picks);
+    }
+    if (action.type === 'opener_resume' && state.phase === 'opener-sim') {
+      return openerResume(state, action.picks);
     }
     if (action.type === 'opener_solo' && state.phase === 'opener-sim') {
       return openerSolo(state, action.player, action.hole);
@@ -326,6 +335,9 @@
   }
 
   function openerRound(state, picks) {
+    if (state.pendingPause) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'paused-use-resume' }] };
+    }
     if (!picks || picks.length !== 2) {
       return { state: state, events: [{ kind: 'invalid', reason: 'badPicks' }] };
     }
@@ -353,30 +365,111 @@
       if (picks[p2] == null) continue;
       var count = b.holes[picks[p2]];
       b.holes[picks[p2]] = 0;
-      hands[p2] = {
-        player: p2,
-        currentHole: picks[p2],
-        carrying: count,
-        path: sowPath(picks[p2], p2),
-        pathIdx: 0,
-        passedOwnRumah: false,
-        done: false,
-        result: null, // 'anotherTurn' | 'tikam' | 'noCaptureNotPassed' | 'noCaptureOppEmpty' | 'mati'
-      };
+      hands[p2] = freshHand(p2, picks[p2], count);
       events.push({ kind: 'pickup', player: p2, hole: picks[p2], count: count });
     }
 
-    // Tick loop: both hands advance in lockstep until both done.
-    // Bounded to prevent pathological infinite loops.
+    return runOpenerTicksAndFinalize(state, b, hands, 0, events, state.openerDone.slice(), picks);
+  }
+
+  // Resume action: state.pendingPause must be set. `picks[p]` is the pausing
+  // player's new starting hole (or null for non-pausers). Frozen hands are
+  // rebuilt from state.pendingPause.frozen and the round continues.
+  function openerResume(state, picks) {
+    if (!state.pendingPause) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'noPause' }] };
+    }
+    if (!picks || picks.length !== 2) {
+      return { state: state, events: [{ kind: 'invalid', reason: 'badPicks' }] };
+    }
+    var pp = state.pendingPause;
+    // Each pauser must supply a pick; each non-pauser must supply null.
+    for (var p = 0; p < 2; p++) {
+      var pick = picks[p];
+      if (pp.pausers[p]) {
+        if (pick == null) return { state: state, events: [{ kind: 'invalid', reason: 'missingPick' }] };
+        if (!isOwnSide(pick, p)) return { state: state, events: [{ kind: 'invalid', reason: 'notOwnSide' }] };
+        if (state.holes[pick] === 0) return { state: state, events: [{ kind: 'invalid', reason: 'emptyHole' }] };
+      } else {
+        if (pick != null) return { state: state, events: [{ kind: 'invalid', reason: 'notPauser' }] };
+      }
+    }
+
+    var b = cloneBoard(state);
+    var events = [];
+    var hands = [null, null];
+
+    for (var p2 = 0; p2 < 2; p2++) {
+      if (pp.pausers[p2]) {
+        // Pauser picks a new hole; start a fresh hand.
+        var count = b.holes[picks[p2]];
+        b.holes[picks[p2]] = 0;
+        hands[p2] = freshHand(p2, picks[p2], count);
+        events.push({ kind: 'pickup', player: p2, hole: picks[p2], count: count });
+      } else if (pp.frozen[p2]) {
+        // Unfreeze: rebuild the live hand from the snapshot.
+        var f = pp.frozen[p2];
+        hands[p2] = {
+          player: p2,
+          currentHole: f.currentHole,
+          carrying: f.carrying,
+          path: sowPath(f.currentHole, p2),
+          pathIdx: f.pathIdx,
+          passedOwnRumah: f.passedOwnRumah,
+          done: false,
+          result: null,
+        };
+        // No pickup event — this hand is mid-sow.
+      }
+      // else: neither pauser nor frozen → player is already done this round.
+    }
+
+    // Start ticking from the tick AFTER the pause.
+    var clearedPauseState = Object.assign({}, state, { pendingPause: null });
+    return runOpenerTicksAndFinalize(clearedPauseState, b, hands, pp.tick + 1, events, pp.openerDoneSoFar.slice(), /* picks only used for finalization heuristics */ null);
+  }
+
+  function freshHand(player, startHole, count) {
+    return {
+      player: player,
+      currentHole: startHole,
+      carrying: count,
+      path: sowPath(startHole, player),
+      pathIdx: 0,
+      passedOwnRumah: false,
+      done: false,
+      result: null, // 'anotherTurn' | 'tikam' | 'noCaptureNotPassed' | 'noCaptureOppEmpty' | 'mati'
+    };
+  }
+
+  // Freeze a live hand for the pendingPause snapshot. Strips `path` (recomputed
+  // from currentHole on resume) and runtime flags; keeps what's needed to
+  // render + resume.
+  function freezeHand(hand) {
+    return {
+      player: hand.player,
+      currentHole: hand.currentHole,
+      carrying: hand.carrying,
+      pathIdx: hand.pathIdx,
+      passedOwnRumah: hand.passedOwnRumah,
+    };
+  }
+
+  // Tick loop + finalization. Can return early with pendingPause if a hand
+  // lands in its own rumah while the other is still carrying seeds. `picks`
+  // (if non-null) is the ORIGINAL opener_round picks, used for the RPS
+  // finalization's single-active check.
+  function runOpenerTicksAndFinalize(state, b, hands, startTick, events, openerDoneSoFar, picks) {
     var MAX_TICKS = 500;
-    for (var tick = 0; tick < MAX_TICKS; tick++) {
+    var tick = startTick;
+    var pauseTriggered = false;
+    for (; tick < MAX_TICKS; tick++) {
       var anyActive = false;
       for (var q = 0; q < 2; q++) {
         if (hands[q] && !hands[q].done) { anyActive = true; break; }
       }
       if (!anyActive) break;
 
-      // Compute each active hand's target this tick (next path stop)
       var targets = [null, null];
       for (var r = 0; r < 2; r++) {
         if (hands[r] && !hands[r].done && hands[r].carrying > 0) {
@@ -384,17 +477,17 @@
         }
       }
 
-      // Collision: both targets point to same stop
       var collision = targets[0] && targets[1] && sameStop(targets[0], targets[1]);
+
+      // Track who got anotherTurn this tick (for pause detection at tick end).
+      var anotherThisTick = [false, false];
 
       for (var s = 0; s < 2; s++) {
         if (!targets[s]) continue;
         if (collision && s === 1) {
-          // Higher-seat bumps, lower-seat drops. Hand stays put, retries next tick.
           events.push({ kind: 'bump', player: s, at: targets[s] });
           continue;
         }
-        // Drop
         var stop = targets[s];
         if (stop.type === 'hole') {
           b.holes[stop.idx] += 1;
@@ -406,19 +499,76 @@
         hands[s].carrying -= 1;
         hands[s].pathIdx += 1;
 
-        // Terminal analysis if this was the last drop in hand
         if (hands[s].carrying === 0) {
           analyzeEndOfSow(b, hands[s], events);
-          // Record the tick at which this hand terminated (not set for chain continuations)
           if (hands[s].done && hands[s].doneTick == null) hands[s].doneTick = tick;
+          if (hands[s].result === 'anotherTurn') anotherThisTick[s] = true;
         }
+      }
+
+      // Pause check (end of tick): did anyone end with anotherTurn while
+      // another hand is still carrying seeds? If so, stop here and emit a
+      // pendingPause. Players whose anotherTurn hand has no legal follow-up
+      // pick (their own side is empty) are finalized normally instead of
+      // pausing — we let openerDone flip for them via the usual path.
+      if (anotherThisTick[0] || anotherThisTick[1]) {
+        var anyStillActive = (hands[0] && !hands[0].done && hands[0].carrying > 0)
+                           || (hands[1] && !hands[1].done && hands[1].carrying > 0);
+        // Only consider the pause branch when another hand is still sowing;
+        // otherwise the round is effectively ending and we fall through to
+        // finalization (preserving anotherTurn → openerDone stays false).
+        var pausers = [false, false];
+        if (anyStillActive) {
+          for (var u = 0; u < 2; u++) {
+            if (anotherThisTick[u] && playerHasMoves(b, u)) pausers[u] = true;
+            else if (anotherThisTick[u] && !playerHasMoves(b, u)) {
+              // Dead-end pauser: can't pick new hole (own side empty). Flip
+              // to openerDone so the round can close when the still-active
+              // hand terminates.
+              hands[u].result = 'anotherTurnDeadEnd';
+            }
+          }
+        }
+        if (anyStillActive && (pausers[0] || pausers[1])) {
+          // Freeze the non-pausing active hand (if any).
+          var frozen = [null, null];
+          for (var v = 0; v < 2; v++) {
+            if (!pausers[v] && hands[v] && !hands[v].done && hands[v].carrying > 0) {
+              frozen[v] = freezeHand(hands[v]);
+            }
+          }
+          events.push({ kind: 'openerPause', pausers: pausers.slice(), tick: tick });
+          return {
+            state: {
+              holes: b.holes,
+              rumah: b.rumah,
+              turn: state.turn,
+              phase: state.phase,
+              openerDone: openerDoneSoFar.slice(),
+              awaitingTiebreaker: false,
+              pendingPause: {
+                tick: tick,
+                pausers: pausers,
+                frozen: frozen,
+                openerDoneSoFar: openerDoneSoFar.slice(),
+              },
+              seedsPerHole: state.seedsPerHole,
+              winner: null,
+              seq: state.seq + 1,
+            },
+            events: events,
+          };
+        }
+        // Edge case: all anotherTurn-ers are dead-ends and no one else is
+        // active. Fall through to finalization below (round ends).
       }
     }
 
-    // Update openerDone flags based on each hand's result
-    var newOpenerDone = state.openerDone.slice();
+    // Update openerDone flags based on each hand's result. anotherTurn
+    // (legitimate) does NOT flip openerDone; anotherTurnDeadEnd does.
+    var newOpenerDone = openerDoneSoFar.slice();
     for (var t = 0; t < 2; t++) {
-      if (hands[t] && hands[t].result !== 'anotherTurn') {
+      if (hands[t] && hands[t].result != null && hands[t].result !== 'anotherTurn') {
         newOpenerDone[t] = true;
       }
     }
@@ -435,13 +585,8 @@
       winner = { player: w, scores: b.rumah.slice() };
       events.push({ kind: 'roundEnd', winner: w, scores: b.rumah.slice() });
     } else if (newOpenerDone[0] && newOpenerDone[1]) {
-      // Both players finished opener → need to decide who goes first in alternating.
-      var bothActiveThisRound = picks[0] != null && picks[1] != null;
-      // Tick-simultaneous = both hands terminated on the exact same tick.
-      // Differing ticks = one finished before the other; earlier one was
-      // "waiting" while the other kept chaining, so they get first turn.
+      var bothActiveThisRound = hands[0] != null && hands[1] != null;
       var tickSimultaneous = bothActiveThisRound
-        && hands[0] && hands[1]
         && hands[0].doneTick != null && hands[1].doneTick != null
         && hands[0].doneTick === hands[1].doneTick;
       if (tickSimultaneous) {
@@ -454,6 +599,7 @@
             phase: state.phase,
             openerDone: newOpenerDone,
             awaitingTiebreaker: true,
+            pendingPause: null,
             seedsPerHole: state.seedsPerHole,
             winner: null,
             seq: state.seq + 1,
@@ -461,13 +607,11 @@
           events: events,
         };
       }
-      // Either single-active, or different done-ticks — earlier finisher
-      // (the waiter) takes the first alternating turn.
       newPhase = 'alternating';
       if (bothActiveThisRound) {
         var earlier = hands[0].doneTick < hands[1].doneTick ? 0 : 1;
         newTurn = playerHasMoves(b, earlier) ? earlier : (1 - earlier);
-      } else if (picks[0] != null) {
+      } else if (hands[0]) {
         newTurn = playerHasMoves(b, 1) ? 1 : 0;
       } else {
         newTurn = playerHasMoves(b, 0) ? 0 : 1;
@@ -486,6 +630,7 @@
         phase: newPhase,
         openerDone: newOpenerDone,
         awaitingTiebreaker: false,
+        pendingPause: null,
         seedsPerHole: state.seedsPerHole,
         winner: winner,
         seq: state.seq + 1,
